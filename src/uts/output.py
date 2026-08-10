@@ -80,6 +80,8 @@ def _head_tags(r: Result) -> list[str]:
         tags.append(f"session={r.extra['session']}")
         if r.extra.get("cwd"):
             tags.append(f"cwd {r.extra['cwd']}")
+    if r.extra.get("pty"):
+        tags.append("pty · stderr merged into stdout")
     return tags
 
 

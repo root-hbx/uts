@@ -61,5 +61,22 @@ command whose meaning depends on invisible state is a command you cannot trust:
 ./uts sessions                                     # where each one currently stands
 ```
 
+**Terminals**, for the programs that insist on one:
+
+```bash
+./uts exec test --pty -- sudo systemctl status ssh
+./uts exec test --pty --duration 3 -- btop    # full-screen program → one text frame
+./uts shell test                              # interactive, one host, for a person
+```
+
 `./uts` is a shim that uses `uv` to install dependencies, so there is no
 `pip install` step.
+
+## What it does not do
+
+The remote side stays untouched: no agent, no daemon, no installed package. The only
+thing uts leaves there is `~/.uts/jobs/` for detached jobs — plain files, removable
+with `uts jobs --clean`.
+
+`--write` and the guard behind it stop accidents, not attacks. It matches command
+strings with regexes and is trivial to talk around; treat it as a seatbelt.

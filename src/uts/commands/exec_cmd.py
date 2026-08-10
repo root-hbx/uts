@@ -38,6 +38,8 @@ def run(
     session_name: str | None = None,
     workspace_root: str | None = None,
     detach: bool = False,
+    pty: bool = False,
+    duration: float | None = None,
 ) -> int:
     command = command.strip()
     if not command:
@@ -54,8 +56,22 @@ def run(
             print(guard.explain(command, reason), file=sys.stderr)
             return EXIT_BLOCKED
 
+    if detach and pty:
+        print(
+            "--detach and --pty cannot be combined: a detached job has no terminal to "
+            "attach to, and nobody would be reading it.",
+            file=sys.stderr,
+        )
+        return EXIT_BLOCKED
+
     if detach:
         return _detach(hosts, command, jobs, limits, as_json, session_name, workspace_root)
+
+    if pty:
+        results = _run_with_pty(
+            hosts, command, jobs, limits, duration, max_cols, session_name, workspace_root
+        )
+        return emit(results, as_json, hint="raise --max-lines", max_cols=max_cols)
 
     if session_name:
         results = _run_in_session(hosts, command, jobs, limits, session_name, workspace_root)
@@ -67,6 +83,48 @@ def run(
         hint="raise --max-lines, or narrow with grep/tail on the remote side",
         max_cols=max_cols,
     )
+
+
+def _run_with_pty(
+    hosts: list[Host],
+    command: str,
+    jobs: int,
+    limits: Limits,
+    duration: float | None,
+    max_cols: int,
+    session_name: str | None,
+    workspace_root: str | None,
+) -> list[Result]:
+    from ..screen import DEFAULT_ROWS, render_frame, strip_ansi
+
+    # A session's cwd and exports are replayed, but no state is read back: the
+    # trailer would be painted over by a full-screen program, and under a plain PTY
+    # it would land in the middle of the captured terminal output.
+    session = Session(session_name, workspace_root) if session_name else None
+    # Wide enough that btop's columns do not collapse, and the caller's own
+    # --max-cols still folds anything wider afterwards.
+    cols = max_cols if max_cols and max_cols >= 80 else 160
+
+    def task(conn: Conn) -> Result:
+        wrapped = command
+        if session:
+            prefix = remote.session_prefix(session.cwd(conn.host.name),
+                                           session.env(conn.host.name))
+            if prefix:
+                wrapped = "\n".join([*prefix, command])
+        result = conn.run_pty(wrapped, limits, cols=cols, rows=DEFAULT_ROWS,
+                              duration=duration)
+        if duration is None:
+            result.stdout = strip_ansi(result.stdout)
+        else:
+            result.stdout = render_frame(result.extra.pop("raw", b""), cols, DEFAULT_ROWS)
+            result.extra["frame_after"] = duration
+        if session_name:
+            result.extra["session"] = session_name
+            result.extra["cwd"] = session.cwd(conn.host.name) if session else None
+        return result
+
+    return run_many(hosts, task, jobs=jobs)
 
 
 def _detach(

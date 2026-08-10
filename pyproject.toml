@@ -3,7 +3,7 @@ name = "uts"
 version = "0.1.0"
 description = "Let a single Claude-equipped laptop see and analyse logs on other machines over SSH"
 requires-python = ">=3.11"
-dependencies = ["paramiko>=3.4"]
+dependencies = ["paramiko>=3.4", "pyte>=0.8"]
 
 [project.scripts]
 uts = "uts.cli:main"

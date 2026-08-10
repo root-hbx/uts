@@ -100,9 +100,27 @@ def build_parser() -> argparse.ArgumentParser:
              "uts jobs / uts logs / uts kill",
     )
     sp_exec.add_argument(
+        "--pty", action="store_true",
+        help="attach a terminal, so programs that check for one behave normally; "
+             "note this merges stderr into stdout",
+    )
+    sp_exec.add_argument(
+        "--duration", type=float, metavar="S",
+        help="with --pty: let a full-screen program (btop, htop) paint for S seconds, "
+             "then return the screen it drew as text",
+    )
+    sp_exec.add_argument(
         "argv", nargs=argparse.REMAINDER,
         help="the command to run; separate it with --, e.g. uts exec all -- ls -la",
     )
+
+    sp_shell = sub.add_parser(
+        "shell",
+        help="open an interactive terminal on one host (for a person, not an agent)",
+        description="Needs a real terminal and exactly one host. For scripted use, "
+                    "uts exec --pty gives the same terminal without the interaction.",
+    )
+    sp_shell.add_argument("selector")
 
     sp_jobs = sub.add_parser("jobs", help="list the detached jobs on the selected hosts")
     sp_jobs.add_argument("selector", nargs="?", default="all")
@@ -208,6 +226,8 @@ EXEC_OWN_FLAGS: dict[str, bool] = {
     "--write": False,
     "--session": True,
     "--detach": False,
+    "--pty": False,
+    "--duration": True,
 }
 
 
@@ -271,6 +291,16 @@ def split_exec_argv(
     if len(parts) == 1:
         return hoisted, parts[0]
     return hoisted, shlex.join(parts)
+
+
+def _as_seconds(value) -> float | None:
+    """--duration is a float via argparse but a string when hoisted out of REMAINDER."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise UsageError(f"--duration wants a number of seconds, got {value!r}") from None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -338,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             hoisted, command = split_exec_argv(args.argv, separator_used="--" in raw_argv)
+            duration = _as_seconds(args.duration or hoisted.get("--duration"))
         except UsageError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_BLOCKED
@@ -352,7 +383,14 @@ def main(argv: list[str] | None = None) -> int:
             args.session or hoisted.get("--session"),
             args.workspace,
             args.detach or bool(hoisted.get("--detach")),
+            args.pty or bool(hoisted.get("--pty")),
+            duration,
         )
+
+    if args.command == "shell":
+        from .commands import shell as shell_cmd
+
+        return shell_cmd.run(selected, args.selector)
 
     if args.command == "jobs":
         return jobs_cmd.run_jobs(selected, args.jobs, args.timeout, args.json, args.clean)

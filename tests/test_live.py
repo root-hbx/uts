@@ -457,6 +457,128 @@ def test_the_job_footprint_is_confined_and_removable(target, no_jobs, capsys):
     assert r.stdout.strip() == "0"
 
 
+# ------------------------------------------------------------------ pty
+
+
+def test_pty_gives_the_remote_side_a_real_terminal(target, capsys):
+    assert main(["exec", "test", "--pty", "tty; echo TERM=$TERM"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "/dev/pts/" in out
+    assert "TERM=xterm-256color" in out
+
+
+def test_without_pty_there_is_still_no_terminal(target, capsys):
+    # The default path must not have quietly changed.
+    main(["exec", "test", "tty"])
+    assert "not a tty" in capsys.readouterr().out
+
+
+def test_pty_says_in_the_header_that_stderr_was_merged(target, capsys):
+    # Silence here would let an empty stderr read as "nothing went wrong".
+    main(["exec", "test", "--pty", "echo err >&2"])
+    out = capsys.readouterr().out
+    assert "stderr merged into stdout" in out
+    assert "err" in out
+
+
+def test_pty_output_has_no_escape_sequences_left(target, capsys):
+    main(["exec", "test", "--pty", "ls --color=always /etc | head -5"])
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "\r" not in out
+
+
+def test_pty_preserves_the_exit_code(target, capsys):
+    assert main(["exec", "test", "--pty", "exit 9"]) == EXIT_REMOTE_NONZERO
+    assert "rc=9" in capsys.readouterr().out
+
+
+def test_a_full_screen_program_comes_back_as_a_readable_frame(target, capsys):
+    # The original "uts cannot do this": btop refuses to start without a terminal,
+    # and even with one it paints rather than prints.
+    code = main(["--max-cols", "0", "exec", "test", "--pty", "--duration", "3", "--", "btop"])
+    out = capsys.readouterr().out
+    assert code == EXIT_OK
+    assert "No tty detected" not in out
+    assert "Load AVG" in out              # a label only the drawn screen has
+    assert "cpu" in out and "mem" in out
+    assert "\x1b" not in out
+
+
+def test_detach_and_pty_together_are_refused(target, capsys):
+    from uts.output import EXIT_BLOCKED
+
+    assert main(["exec", "test", "--pty", "--detach", "--", "btop"]) == EXIT_BLOCKED
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_pty_runs_inside_a_session(target, tmp_path, capsys):
+    ws = str(tmp_path / "ws")
+    main(["--workspace", ws, "exec", "test", "--session", "p", "cd /etc"])
+    capsys.readouterr()
+    main(["--workspace", ws, "exec", "test", "--session", "p", "--pty", "pwd"])
+    assert "/etc" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ interactive shell
+
+
+def test_shell_is_a_real_interactive_terminal(target):
+    """Drive `uts shell` through a pty, the way a person's terminal would.
+
+    Nothing else covers this: the command refuses to run without a terminal, which
+    is precisely what a test runner does not have. So one is made.
+    """
+    import os
+    import pty
+    import select
+    import subprocess
+    import time
+
+    # openpty + subprocess rather than pty.fork(): by this point the fan-out tests
+    # have left threads in this process, and forking one of those can deadlock the
+    # child before it reaches exec.
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        ["./uts", "shell", "test"],
+        stdin=slave, stdout=slave, stderr=slave,
+        env={**os.environ, "TERM": "xterm-256color"},
+        start_new_session=True,
+    )
+    os.close(slave)
+
+    typed = [(2.5, b"echo INTERACTIVE-OK\n"), (1.5, b"exit\n")]
+    out, step = b"", 0
+    next_at = time.monotonic() + typed[0][0]
+    deadline = time.monotonic() + 25
+    try:
+        while time.monotonic() < deadline and proc.poll() is None:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if ready:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:                     # the pty closed with the session
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            if step < len(typed) and time.monotonic() >= next_at:
+                os.write(master, typed[step][1])
+                step += 1
+                if step < len(typed):
+                    next_at = time.monotonic() + typed[step][0]
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+
+    text = out.decode("utf-8", "replace")
+    assert "uts: connected to" in text
+    assert "INTERACTIVE-OK" in text                 # the remote shell ran what we typed
+    assert proc.returncode == 0
+
+
 def test_path_spec_injection_is_blocked_before_any_connection(capsys):
     from uts.output import EXIT_BLOCKED
 

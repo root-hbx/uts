@@ -247,6 +247,68 @@ class Conn:
             chan.close()
         return rc, written, err.text()
 
+    def run_pty(
+        self,
+        command: str,
+        limits: Limits | None = None,
+        cols: int = 160,
+        rows: int = 48,
+        duration: float | None = None,
+    ) -> Result:
+        """Run a command with a pseudo-terminal attached.
+
+        Two things change versus run(). The remote end sees a terminal, so programs
+        that check isatty behave as they would interactively — which is the only way
+        `sudo`, and anything curses-based, runs at all. And stderr comes back merged
+        into stdout, because that is what a terminal is: one stream. Callers must
+        surface that, or an empty stderr reads as "no errors".
+
+        With `duration` the command is a full-screen program that never exits on its
+        own. It is given that long, sent `q`, and the raw bytes are handed back for
+        the caller to replay against a screen. Killing it outright instead would work
+        too, but a clean quit lets the program restore the terminal and is far less
+        likely to leave a half-drawn frame.
+        """
+        limits = limits or Limits()
+        started = time.monotonic()
+        wall_start = time.time()
+        transport = self.client().get_transport()
+        if transport is None:
+            raise paramiko.SSHException("connection dropped")
+        chan = transport.open_session()
+        chan.settimeout(limits.timeout)
+        raw = bytearray()
+        try:
+            chan.get_pty(term="xterm-256color", width=cols, height=rows)
+            chan.exec_command(command)
+            if duration is None:
+                out, err, aborted = _drain(chan, limits)
+                rc = chan.recv_exit_status() if not aborted else -1
+            else:
+                out, aborted = _drain_for(chan, raw, duration, limits)
+                err = _Capped(STDERR_MAX_BYTES, STDERR_MAX_LINES)
+                # The program was still running when we stopped it, so its exit
+                # status says nothing about whether the work succeeded.
+                rc = 0
+        finally:
+            chan.close()
+
+        return Result(
+            host=self.host,
+            rc=rc,
+            stdout=out.text(),
+            stderr=err.text(),
+            duration=time.monotonic() - started,
+            truncated=out.truncated,
+            dropped_lines=out.dropped_lines,
+            dropped_bytes=out.dropped_bytes,
+            aborted=aborted,
+            wall_start=wall_start,
+            wall_end=time.time(),
+            extra={"pty": True, "raw": bytes(raw)} if duration is not None
+            else {"pty": True},
+        )
+
     def stream_stdin(self, command: str, source, timeout: float = 600.0) -> tuple[int, int, str]:
         """Feed `source` (a binary file object) into the remote command's stdin.
 
@@ -300,6 +362,52 @@ class Conn:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def _drain_for(
+    chan, raw: bytearray, duration: float, limits: Limits
+) -> tuple[_Capped, bool]:
+    """Watch a full-screen program for `duration`, then ask it to quit.
+
+    Every byte is kept in `raw` for the screen replay, and separately fed to the
+    normal capped buffer so a program that floods still cannot exhaust local memory.
+    """
+    out = _Capped(limits.max_bytes, limits.max_lines)
+    deadline = time.monotonic() + duration
+    quit_sent = False
+    received = 0
+
+    while True:
+        ready, _, _ = select.select([chan], [], [], 0.1)
+        if ready:
+            while chan.recv_ready():
+                chunk = chan.recv(32768)
+                if not chunk:
+                    break
+                received += len(chunk)
+                if not quit_sent:
+                    raw.extend(chunk)
+                out.feed(chunk)
+
+        if received > limits.hard_abort_bytes:
+            return out, True
+
+        if not quit_sent and time.monotonic() > deadline:
+            # `q` covers btop/htop/less/top; ESC and Ctrl-C cover most of the rest.
+            # Anything still alive after that is closed out below.
+            for key in (b"q", b"\x1b", b"\x03"):
+                try:
+                    chan.sendall(key)
+                except OSError:
+                    break
+            quit_sent = True
+            deadline = time.monotonic() + 1.0
+            continue
+
+        if quit_sent and (chan.exit_status_ready() or time.monotonic() > deadline):
+            return out, False
+        if chan.eof_received and not chan.recv_ready():
+            return out, False
 
 
 def _drain_side_channels(chan, err: _Capped) -> None:
