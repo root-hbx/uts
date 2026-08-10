@@ -71,6 +71,18 @@ def truncation_note(result: Result, hint: str = DEFAULT_HINT) -> str | None:
     return f"… [truncated: {' / '.join(parts)} not shown — {hint}]"
 
 
+def _head_tags(r: Result) -> list[str]:
+    """The block header. Anything that changes how the output should be read belongs
+    here rather than buried in the body — a session's cwd decides what a relative
+    path meant, and a PTY silently folds stderr into stdout."""
+    tags = [r.host.label, f"rc={r.rc}", f"{r.duration:.2f}s"]
+    if r.extra.get("session"):
+        tags.append(f"session={r.extra['session']}")
+        if r.extra.get("cwd"):
+            tags.append(f"cwd {r.extra['cwd']}")
+    return tags
+
+
 def render(
     results: list[Result],
     hint: str = DEFAULT_HINT,
@@ -84,8 +96,8 @@ def render(
             )
             continue
 
-        head = f"=== {r.host.label} · rc={r.rc} · {r.duration:.2f}s ==="
-        body: list[str] = []
+        head = "=== " + " · ".join(_head_tags(r)) + " ==="
+        body: list[str] = [f"  {line}" for line in r.extra.get("notes", [])]
         stdout = fold_wide_lines(r.stdout.rstrip("\n"), max_cols)
         if stdout:
             body.append(stdout)

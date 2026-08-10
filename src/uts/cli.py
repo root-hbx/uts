@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
+from typing import Any
 
 from .conn import DEFAULT_EXEC_TIMEOUT, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limits
 from .inventory import InventoryError, load_inventory, select
 from .commands.pull import DEFAULT_MAX_SIZE as PULL_DEFAULT_MAX_SIZE
 from .commands.push import DEFAULT_MAX_SIZE as PUSH_DEFAULT_MAX_SIZE
-from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED
+from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED, EXIT_BLOCKED
 
 EPILOG = """\
 selectors:
@@ -33,6 +34,10 @@ the other direction:
 
 Quote path specs in single quotes: `~` and `*` are expanded by the remote shell.
 """
+
+
+class UsageError(Exception):
+    """The command line is malformed in a way argparse cannot see."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp_exec.add_argument(
         "--write", action="store_true",
         help="allow destructive commands; accepted before or after the selector",
+    )
+    sp_exec.add_argument(
+        "--session", metavar="NAME",
+        help="carry cwd and exported variables over from earlier commands in this "
+             "session; without it every command starts from a clean login",
     )
     sp_exec.add_argument(
         "argv", nargs=argparse.REMAINDER,
@@ -156,6 +166,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"total size limit, default {PUSH_DEFAULT_MAX_SIZE}",
     )
 
+    sp_sessions = sub.add_parser(
+        "sessions",
+        help="list the named exec sessions and where each one currently stands",
+    )
+    sp_sessions.add_argument("--clear", metavar="NAME", help="forget one session, or 'all'")
+
     sub.add_parser("index", help="rebuild .uts/INDEX.md and print a workspace summary")
 
     return p
@@ -165,17 +181,22 @@ def build_parser() -> argparse.ArgumentParser:
 # swallows everything after the selector, flags included, so every flag added to
 # `exec` has to be listed here too — otherwise it silently becomes the first word
 # of the remote command.
-EXEC_OWN_FLAGS = ("--write",)
+EXEC_OWN_FLAGS: dict[str, bool] = {
+    "--write": False,
+    "--session": True,
+}
 
 
-def split_exec_argv(argv: list[str], separator_used: bool = False) -> tuple[bool, str]:
-    """Split `exec`'s REMAINDER into (write, command).
+def split_exec_argv(
+    argv: list[str], separator_used: bool = False
+) -> tuple[dict[str, Any], str]:
+    """Split `exec`'s REMAINDER into (hoisted flags, command).
 
-    argparse.REMAINDER swallows everything after the selector, flags included, so
     `uts exec test --write -- rm x` used to send `--write` to the remote shell and
-    silently leave write mode off. Leading flags before the command are therefore
-    hoisted back out here. Anything after an explicit `--` belongs to the remote
-    command and is never touched, so `uts exec test -- mytool --write` still works.
+    silently leave write mode off, because REMAINDER takes flags too. Leading uts
+    flags are therefore hoisted back out here. Anything after an explicit `--`
+    belongs to the remote command and is never touched, so
+    `uts exec test -- mytool --write` still works.
 
     Quoting is the other half. Joining the tokens with a plain space loses the
     quotes the local shell already stripped, so `-- pgrep -af 'sleep 600'` arrives
@@ -188,30 +209,44 @@ def split_exec_argv(argv: list[str], separator_used: bool = False) -> tuple[bool
     `exec test --write -- rm x`, so by this point it is no longer a reliable signal
     of what the user typed.
     """
-    write = False
+    hoisted: dict[str, Any] = {}
     i = 0
-    while i < len(argv) and argv[i] in EXEC_OWN_FLAGS:
-        write = True  # only --write lives in EXEC_OWN_FLAGS today
-        i += 1
+    while i < len(argv):
+        name, eq, inline = argv[i].partition("=")
+        if name not in EXEC_OWN_FLAGS:
+            break
+        if not EXEC_OWN_FLAGS[name]:
+            hoisted[name] = True
+            i += 1
+        elif eq:
+            hoisted[name] = inline
+            i += 1
+        elif i + 1 < len(argv):
+            hoisted[name] = argv[i + 1]
+            i += 2
+        else:
+            raise UsageError(f"{name} needs a value")
+
     if i < len(argv) and argv[i] == "--":
         separator_used = True
         i += 1
 
     parts = argv[i:]
-    # Buried in the middle with no `--` in sight, `--write` is far more likely to be
-    # a misplaced uts flag than an argument the remote program wants. Guessing either
-    # way would be wrong sometimes, so it is passed through with a note.
-    if not separator_used and any(flag in parts for flag in EXEC_OWN_FLAGS):
+    # Buried in the middle with no `--` in sight, a uts flag is far more likely to be
+    # misplaced than something the remote program wants. Guessing either way would be
+    # wrong sometimes, so it is passed through with a note.
+    if not separator_used:
         leaked = [flag for flag in EXEC_OWN_FLAGS if flag in parts]
-        print(
-            f"note: {', '.join(leaked)} was sent to the remote command, not read by uts.\n"
-            f"      Put it before the command: uts exec {leaked[0]} <selector> ...",
-            file=sys.stderr,
-        )
+        if leaked:
+            print(
+                f"note: {', '.join(leaked)} was sent to the remote command, not read by uts.\n"
+                f"      Put it before the command: uts exec {leaked[0]} <selector> ...",
+                file=sys.stderr,
+            )
 
     if len(parts) == 1:
-        return write, parts[0]
-    return write, shlex.join(parts)
+        return hoisted, parts[0]
+    return hoisted, shlex.join(parts)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -242,6 +277,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{summary} across {plural(hosts_seen, 'host')}")
         return 0
 
+    if args.command == "sessions":
+        from .session import Session, list_sessions
+
+        if args.clear:
+            targets = list_sessions(args.workspace) if args.clear == "all" else [
+                Session(args.clear, args.workspace)
+            ]
+            gone = [s.name for s in targets if s.path.exists()]
+            for s in targets:
+                s.path.unlink(missing_ok=True)
+            print(f"cleared: {', '.join(gone)}" if gone else "no such session")
+            return 0
+
+        sessions = list_sessions(args.workspace)
+        if not sessions:
+            print("no sessions yet. Start one with: uts exec <host> --session <name> 'cd ~/proj'")
+            return 0
+        for s in sessions:
+            print(s.name)
+            for host in s.hosts():
+                env = s.env(host)
+                suffix = f"  env {', '.join(sorted(env))}" if env else ""
+                print(f"  {host:<16}{s.cwd(host) or '?'}{suffix}")
+        return 0
+
     if args.command == "hosts":
         return hosts_cmd.run(selected, args.json)
 
@@ -252,15 +312,21 @@ def main(argv: list[str] | None = None) -> int:
         limits = Limits(
             max_lines=args.max_lines, max_bytes=args.max_bytes, timeout=args.timeout
         )
-        hoisted_write, command = split_exec_argv(args.argv, separator_used="--" in raw_argv)
+        try:
+            hoisted, command = split_exec_argv(args.argv, separator_used="--" in raw_argv)
+        except UsageError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_BLOCKED
         return exec_cmd.run(
             selected,
             command,
             args.jobs,
             limits,
             args.json,
-            args.write or hoisted_write,
+            args.write or bool(hoisted.get("--write")),
             args.max_cols,
+            args.session or hoisted.get("--session"),
+            args.workspace,
         )
 
     if args.command == "ls":

@@ -41,5 +41,15 @@ Wrap path specs in **single quotes** — `~` and `*` have to reach the remote sh
 ./uts exec test --write 'rm -rf ~/scratch'    # writes are blocked until you say so
 ```
 
+**Sessions** carry `cd` and exported variables forward. They are opt-in, because a
+command whose meaning depends on invisible state is a command you cannot trust:
+
+```bash
+./uts exec test --session build 'cd ~/proj && . .venv/bin/activate'
+./uts exec test --session build 'which python'     # → ~/proj/.venv/bin/python
+./uts exec test 'which python'                     # → /usr/bin/python3, untouched
+./uts sessions                                     # where each one currently stands
+```
+
 `./uts` is a shim that uses `uv` to install dependencies, so there is no
 `pip install` step.

@@ -11,11 +11,19 @@ def parse_exec(args):
     """argv as the shell hands it over, through argparse, into the splitter.
 
     Mirrors main(): the `--` check reads the untouched argv, because argparse
-    removes that separator in some positions and keeps it in others.
+    removes that separator in some positions and keeps it in others. Returns
+    (write, command); the session cases below read `hoisted` directly.
     """
-    return split_exec_argv(
+    hoisted, command = split_exec_argv(
         build_parser().parse_args(args).argv, separator_used="--" in args
     )
+    return bool(hoisted.get("--write")), command
+
+
+def hoist(args):
+    return split_exec_argv(
+        build_parser().parse_args(args).argv, separator_used="--" in args
+    )[0]
 
 
 # ------------------------------------------------------------------ --write position

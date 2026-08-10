@@ -276,6 +276,65 @@ def test_push_records_provenance_in_the_manifest(target, tmp_path, probe_dir, ca
     assert "sent to it" in (ws / "INDEX.md").read_text()
 
 
+# ------------------------------------------------------------------ sessions
+
+
+def test_session_carries_cwd_and_exports_forward(target, tmp_path, capsys):
+    ws = str(tmp_path / "ws")
+
+    assert main(["--workspace", ws, "exec", "test", "--session", "s",
+                 "export MY_VAR=hello; cd /tmp"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "cwd → /tmp" in out and "env +MY_VAR" in out
+
+    assert main(["--workspace", ws, "exec", "test", "--session", "s",
+                 'echo "$MY_VAR from $(pwd)"']) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "hello from /tmp" in out
+    assert "cwd /tmp" in out           # the header says where the command ran
+
+
+def test_a_command_without_session_is_unaffected_by_one(target, tmp_path, capsys):
+    ws = str(tmp_path / "ws")
+    main(["--workspace", ws, "exec", "test", "--session", "s", "cd /tmp"])
+    capsys.readouterr()
+
+    assert main(["--workspace", ws, "exec", "test", "pwd"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "/home/bxhu" in out and "/tmp" not in out
+
+
+def test_the_trailer_never_leaks_into_the_output(target, tmp_path, capsys):
+    ws = str(tmp_path / "ws")
+    main(["--workspace", ws, "exec", "test", "--session", "s", "echo just-this"])
+    out = capsys.readouterr().out
+    assert "uts-session" not in out
+    assert "env -0" not in out
+
+
+def test_truncated_output_says_the_session_did_not_move(target, tmp_path, capsys):
+    # The trailer is appended to stdout, so a command that fills the cap takes the
+    # state report down with it. Silence here would leave the agent believing a `cd`
+    # landed when it did not.
+    ws = str(tmp_path / "ws")
+    main(["--max-lines", "5", "--workspace", ws, "exec", "test", "--session", "s",
+          "cd /tmp && seq 1 100000"])
+    assert "session unchanged" in capsys.readouterr().out
+
+    main(["--workspace", ws, "exec", "test", "--session", "s", "pwd"])
+    assert "/home/bxhu" in capsys.readouterr().out
+
+
+def test_session_survives_across_processes(target, tmp_path, capsys):
+    ws = str(tmp_path / "ws")
+    main(["--workspace", ws, "exec", "test", "--session", "keep", "cd /etc"])
+    capsys.readouterr()
+
+    from uts.session import Session
+
+    assert Session("keep", ws).cwd("test") == "/etc"
+
+
 def test_path_spec_injection_is_blocked_before_any_connection(capsys):
     from uts.output import EXIT_BLOCKED
 

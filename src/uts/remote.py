@@ -278,6 +278,84 @@ def parse_push_probe(stdout: str) -> dict:
     return out
 
 
+# ------------------------------------------------------------------- sessions
+
+# `env -0` and `pwd` are appended after the user's command, so the reply has to be
+# separable from whatever the command itself printed. The nonce is regenerated per
+# invocation and the split is on the *last* occurrence, which is what makes
+# `uts exec test --session s 'cat some-uts-transcript.log'` safe.
+SESSION_SENTINEL = "---uts-session-{nonce}---"
+
+# Record separator between cwd and the environment dump. Neither appears in a path
+# or in `env` output, where entries are already NUL-separated.
+_RS = "\036"
+
+
+def session_prefix(cwd: str | None, env: dict[str, str]) -> list[str]:
+    """The `cd` and `export` lines that put a command back where the session left it."""
+    lines = []
+    if cwd:
+        # Falling back to $HOME rather than failing: a directory that has since been
+        # deleted should not make every later command in the session unusable.
+        lines.append(f'cd {q(cwd)} 2>/dev/null || cd "$HOME"')
+    for key in sorted(env):
+        lines.append(f"export {key}={q(env[key])}")
+    return lines
+
+
+def session_wrap(command: str, cwd: str | None, env: dict[str, str], nonce: str) -> str:
+    """Replay a session's cwd and exports, run the command, then report the new state.
+
+    Known edge: a command that calls `exit` itself terminates the shell before the
+    trailer runs, so that invocation leaves the session unchanged. The rc is still
+    correct, and the alternative — running the command in a subshell so we survive
+    it — would throw away every `cd` and `export` it performed, which is the whole
+    point of a session.
+    """
+    lines = session_prefix(cwd, env)
+    lines.append("{ " + command + "\n}; __uts_rc=$?")
+    lines.append(f"printf '\\n%s\\n' {q(SESSION_SENTINEL.format(nonce=nonce))}")
+    lines.append("pwd")
+    lines.append(f"printf '{_RS}'")
+    lines.append("env -0")
+    lines.append("exit $__uts_rc")
+    return "\n".join(lines)
+
+
+def parse_session_trailer(stdout: str, nonce: str) -> tuple[str, str | None, dict[str, str]]:
+    """(command output, cwd, env). cwd is None when the trailer never arrived."""
+    marker = "\n" + SESSION_SENTINEL.format(nonce=nonce) + "\n"
+    idx = stdout.rfind(marker)
+    if idx < 0:
+        return stdout, None, {}
+
+    body = stdout[:idx]
+    cwd, sep, blob = stdout[idx + len(marker):].partition(_RS)
+    if not sep:
+        return body, None, {}
+
+    env: dict[str, str] = {}
+    for item in blob.split("\0"):
+        key, eq, value = item.partition("=")
+        if eq and key:
+            env[key] = value
+    return body, cwd.strip("\n"), env
+
+
+def env_probe() -> str:
+    """A clean login environment, captured once per session+host as the baseline."""
+    return "env -0"
+
+
+def parse_env0(stdout: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for item in stdout.split("\0"):
+        key, eq, value = item.partition("=")
+        if eq and key:
+            env[key] = value
+    return env
+
+
 def untar_stream(dest: str) -> str:
     """Unpack a gzip stream arriving on stdin into dest.
 
