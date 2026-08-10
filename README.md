@@ -14,10 +14,12 @@ SSH is the only thing required for each server.
     Unifying The Sky: One Claude/Codex/Gemini Deployment, Multiple Backends Support
 </h3>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./uts.svg">
-  <img src="./uts.svg" alt="UTS Demo">
-</picture>
+<p align="center">
+    <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./uts.svg">
+    <img src="./uts.svg" alt="UTS Demo">
+    </picture>
+</p>
 
 ## Quick start
 
