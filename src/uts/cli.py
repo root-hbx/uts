@@ -9,6 +9,7 @@ import sys
 from .conn import DEFAULT_EXEC_TIMEOUT, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limits
 from .inventory import InventoryError, load_inventory, select
 from .commands.pull import DEFAULT_MAX_SIZE as PULL_DEFAULT_MAX_SIZE
+from .commands.push import DEFAULT_MAX_SIZE as PUSH_DEFAULT_MAX_SIZE
 from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED
 
 EPILOG = """\
@@ -26,6 +27,9 @@ typical flow -- look around, narrow down, then fetch:
   uts find test '~/data/' --name '*.log' --since 24h
   uts pull test '~/data/*.csv' --dry-run        see what would be fetched
   uts pull test '~/data/*.csv'                  fetch into .uts/ and record it
+
+the other direction:
+  uts push @gpu ./setup.sh ./lib '~/bin/'       send files out; --force to overwrite
 
 Quote path specs in single quotes: `~` and `*` are expanded by the remote shell.
 """
@@ -129,11 +133,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_pull.add_argument("--dry-run", action="store_true", help="report what would be fetched")
 
+    sp_push = sub.add_parser(
+        "push",
+        help="copy local files to the selected hosts (single tar+gzip stream)",
+        description="The mirror of pull, and it reads like cp: every path but the last is "
+                    "local, the last one is the remote destination directory "
+                    "(uts push @gpu ./setup.sh ./lib '~/bin/'). A source directory is "
+                    "reproduced under the destination by its own name. Existing remote "
+                    "files are never overwritten without --force.",
+    )
+    sp_push.add_argument("selector")
+    sp_push.add_argument(
+        "paths", nargs="+", metavar="SRC ... DEST",
+        help="one or more local sources, then the remote destination directory",
+    )
+    sp_push.add_argument(
+        "--force", action="store_true", help="overwrite remote files that already exist"
+    )
+    sp_push.add_argument("--dry-run", action="store_true", help="report what would be sent")
+    sp_push.add_argument(
+        "--max-size", default=PUSH_DEFAULT_MAX_SIZE, metavar="SIZE",
+        help=f"total size limit, default {PUSH_DEFAULT_MAX_SIZE}",
+    )
+
     sub.add_parser("index", help="rebuild .uts/INDEX.md and print a workspace summary")
 
     return p
 
 
+# exec's own flags, mapped to whether each one takes a value. argparse.REMAINDER
+# swallows everything after the selector, flags included, so every flag added to
+# `exec` has to be listed here too — otherwise it silently becomes the first word
+# of the remote command.
 EXEC_OWN_FLAGS = ("--write",)
 
 
@@ -195,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ALL_FAILED
 
     from .commands import browse, exec_cmd, hosts as hosts_cmd, peek as peek_cmd
-    from .commands import ping as ping_cmd, pull as pull_cmd
+    from .commands import ping as ping_cmd, pull as pull_cmd, push as push_cmd
 
     if args.command == "index":
         from .workspace import Workspace, plural
@@ -203,8 +234,12 @@ def main(argv: list[str] | None = None) -> int:
         ws = Workspace(args.workspace)
         print(f"workspace index rebuilt: {ws.write_index()}")
         entries = ws.latest_per_file()
-        hosts_seen = len({h for h, _ in entries})
-        print(f"{plural(len(entries), 'file')} from {plural(hosts_seen, 'host')}")
+        hosts_seen = len({host for host, _, _ in entries})
+        pushed = sum(1 for _, direction, _ in entries if direction == "push")
+        summary = f"{plural(len(entries) - pushed, 'file')} pulled"
+        if pushed:
+            summary += f", {plural(pushed, 'file')} pushed"
+        print(f"{summary} across {plural(hosts_seen, 'host')}")
         return 0
 
     if args.command == "hosts":
@@ -247,6 +282,12 @@ def main(argv: list[str] | None = None) -> int:
         return pull_cmd.run(
             selected, args.path, args.jobs, args.timeout, args.json,
             args.max_size, args.since, args.lines, args.dry_run, args.workspace,
+        )
+
+    if args.command == "push":
+        return push_cmd.run(
+            selected, args.paths, args.jobs, args.timeout, args.json,
+            args.force, args.dry_run, args.max_size, args.workspace,
         )
 
     raise AssertionError(f"unhandled subcommand {args.command!r}")

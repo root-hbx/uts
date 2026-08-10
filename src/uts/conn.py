@@ -247,6 +247,49 @@ class Conn:
             chan.close()
         return rc, written, err.text()
 
+    def stream_stdin(self, command: str, source, timeout: float = 600.0) -> tuple[int, int, str]:
+        """Feed `source` (a binary file object) into the remote command's stdin.
+
+        The mirror of stream_stdout, and it has one hazard the other direction does
+        not: if the remote command writes while we are still sending, its output
+        window fills, it stops reading, and both sides wait forever. So stdout and
+        stderr are drained between chunks. `chan.settimeout` is the backstop for the
+        case where a single send blocks anyway.
+
+        Returns (rc, bytes sent, stderr).
+        """
+        transport = self.client().get_transport()
+        if transport is None:
+            raise paramiko.SSHException("connection dropped")
+        chan = transport.open_session()
+        chan.settimeout(timeout)
+        err = _Capped(STDERR_MAX_BYTES, STDERR_MAX_LINES)
+        sent = 0
+        deadline = time.monotonic() + timeout
+        try:
+            chan.exec_command(command)
+            while True:
+                chunk = source.read(65536)
+                if not chunk:
+                    break
+                chan.sendall(chunk)
+                sent += len(chunk)
+                _drain_side_channels(chan, err)
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"transfer did not finish within {timeout:g}s")
+            chan.shutdown_write()
+
+            while not chan.exit_status_ready():
+                _drain_side_channels(chan, err)
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"transfer did not finish within {timeout:g}s")
+                time.sleep(0.02)
+            _drain_side_channels(chan, err)
+            rc = chan.recv_exit_status()
+        finally:
+            chan.close()
+        return rc, sent, err.text()
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
@@ -257,6 +300,22 @@ class Conn:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def _drain_side_channels(chan, err: _Capped) -> None:
+    """Empty whatever the remote end has produced. Keeps a send loop from deadlocking.
+
+    stdout is read and discarded: `tar xzf -` has nothing to say on it, and anything
+    that does show up must still be consumed or it blocks the peer.
+    """
+    while chan.recv_stderr_ready():
+        chunk = chan.recv_stderr(32768)
+        if not chunk:
+            break
+        err.feed(chunk)
+    while chan.recv_ready():
+        if not chan.recv(32768):
+            break
 
 
 def _drain(chan, limits: Limits) -> tuple[_Capped, _Capped, bool]:

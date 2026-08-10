@@ -35,7 +35,29 @@ def test_latest_wins_when_a_file_is_pulled_twice(tmp_path):
     ws.record({"host": "a", "remote_path": "/x.log", "size": 99, "fetched_at": 200})
     latest = ws.latest_per_file()
     assert len(latest) == 1
-    assert latest[("a", "/x.log")]["size"] == 99
+    # No `direction` in these entries: they predate push and are read as pulls.
+    assert latest[("a", "pull", "/x.log")]["size"] == 99
+
+
+def test_pushing_and_pulling_the_same_path_stay_separate(tmp_path):
+    # Collapsing the two would make the index claim one of them never happened.
+    ws = Workspace(tmp_path / ".uts")
+    ws.record({"direction": "pull", "host": "a", "remote_path": "/opt/run.sh", "size": 10})
+    ws.record({"direction": "push", "host": "a", "remote_path": "/opt/run.sh", "size": 20})
+    assert len(ws.latest_per_file()) == 2
+
+
+def test_index_separates_the_two_directions(tmp_path):
+    ws = Workspace(tmp_path / ".uts")
+    ws.record({"direction": "pull", "host": "a", "remote_path": "/var/log/app.log", "size": 10})
+    ws.record({
+        "direction": "push", "host": "a", "remote_path": "/opt/run.sh",
+        "size": 20, "local_path": "./run.sh",
+    })
+    text = ws.write_index().read_text()
+    assert "fetched from it" in text
+    assert "sent to it" in text
+    assert "`./run.sh`" in text  # a pushed row records where it came from locally
 
 
 def test_same_path_on_different_hosts_stays_separate(tmp_path):

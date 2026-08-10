@@ -177,6 +177,7 @@ def _pull_tar(
     for f in files:
         local = ws.path_for(host.name, f["path"])
         ws.record({
+            "direction": "pull",
             "host": host.name,
             "ip": host.ip,
             "remote_path": f["path"],
@@ -206,6 +207,7 @@ def _pull_head(
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_text(res.stdout, encoding="utf-8")
         ws.record({
+            "direction": "pull",
             "host": host.name,
             "ip": host.ip,
             "remote_path": f["path"],

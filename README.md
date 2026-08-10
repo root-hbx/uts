@@ -21,7 +21,7 @@ SSH is the only thing required for each server.
     </picture>
 </p>
 
-## Quick start
+## Look around
 
 ```bash
 ./uts ping all                                # are the machines alive
@@ -32,6 +32,14 @@ SSH is the only thing required for each server.
 ```
 
 Wrap path specs in **single quotes** — `~` and `*` have to reach the remote shell.
+
+## Do something
+
+```bash
+./uts push @gpu ./setup.sh ./lib '~/bin/'     # send files out; --force to overwrite
+./uts exec @gpu -- nvidia-smi                 # one command, everywhere, at once
+./uts exec test --write 'rm -rf ~/scratch'    # writes are blocked until you say so
+```
 
 `./uts` is a shim that uses `uv` to install dependencies, so there is no
 `pip install` step.

@@ -223,3 +223,68 @@ def tar_stream(paths: list[str]) -> str:
 
 def head_file(path: str, lines: int) -> str:
     return f"head -n {int(lines)} {q(path)}"
+
+
+# A push destination is one directory, not a pattern: expanding a glob would leave
+# "which of the matches did it mean" unanswerable, and silently picking the first is
+# the kind of guess that loses files.
+_DEST_GLOB = set("*?[")
+
+
+def check_dest(dest: str) -> str:
+    check_path_spec(dest)
+    if _DEST_GLOB & set(dest):
+        raise PathSpecError(
+            f"{dest!r} looks like a glob. A push destination has to be a single "
+            f"directory — `~` still expands, `*` does not."
+        )
+    return dest
+
+
+def push_probe(dest: str, members: list[str]) -> str:
+    """Resolve dest and report which members are already there.
+
+    dest is left unquoted so `~` expands, the same rule as every other path spec in
+    this module; the member names come off the local filesystem and are quoted.
+    Emits "dest\t<resolved>", optionally "notdir\t<path>", then "exists\t<member>".
+    """
+    listing = " ".join(q(m) for m in members)
+    return f"""
+d={check_dest(dest)}
+case "$d" in */) d=${{d%/}} ;; esac
+[ -n "$d" ] || d=.
+printf 'dest\\t%s\\n' "$d"
+if [ -e "$d" ] && [ ! -d "$d" ]; then
+  printf 'notdir\\t%s\\n' "$d"
+  exit 0
+fi
+for p in {listing}; do
+  [ -e "$d/$p" ] && printf 'exists\\t%s\\n' "$p"
+done
+exit 0
+"""
+
+
+def parse_push_probe(stdout: str) -> dict:
+    out: dict = {"dest": None, "notdir": None, "exists": []}
+    for line in stdout.splitlines():
+        key, _, value = line.partition("\t")
+        if key == "dest":
+            out["dest"] = value
+        elif key == "notdir":
+            out["notdir"] = value
+        elif key == "exists":
+            out["exists"].append(value)
+    return out
+
+
+def untar_stream(dest: str) -> str:
+    """Unpack a gzip stream arriving on stdin into dest.
+
+    `mkdir -p` first: pushing into a directory that does not exist yet is the normal
+    case, and tar's own complaint about it does not say which path was missing.
+    """
+    return f"""
+d={check_dest(dest)}
+mkdir -p "$d" && tar xzf - -C "$d"
+"""

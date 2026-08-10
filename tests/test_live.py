@@ -181,6 +181,101 @@ def test_pull_lines_mode_truncates(target, tmp_path, capsys):
     assert json.loads((ws / "manifest.jsonl").read_text().strip())["truncated"] is True
 
 
+# ------------------------------------------------------------------ push
+
+PROBE = "~/uts-live-probe"
+
+
+@pytest.fixture
+def probe_dir(target):
+    """A scratch directory on the remote host, gone again whichever way the test ends."""
+    run(target, f"rm -rf {PROBE}")
+    yield PROBE
+    run(target, f"rm -rf {PROBE}")
+
+
+def test_push_round_trips_bytes_exactly(target, tmp_path, probe_dir, capsys):
+    import hashlib
+
+    src = tmp_path / "payload.txt"
+    src.write_bytes(b"line one\nline two\n\xc3\xa9 non-ascii\n")
+
+    assert main(["--workspace", str(tmp_path / "ws"), "push", "test",
+                 str(src), f"{probe_dir}/"]) == EXIT_OK
+    capsys.readouterr()
+
+    (r,) = run(target, f"sha256sum {probe_dir}/payload.txt")
+    assert r.stdout.split()[0] == hashlib.sha256(src.read_bytes()).hexdigest()
+
+
+def test_push_reproduces_a_directory_by_its_own_name(target, tmp_path, probe_dir, capsys):
+    lib = tmp_path / "lib"
+    (lib / "nested").mkdir(parents=True)
+    (lib / "a.py").write_text("a = 1\n")
+    (lib / "nested" / "b.py").write_text("b = 2\n")
+
+    main(["--workspace", str(tmp_path / "ws"), "push", "test", str(lib), f"{probe_dir}/"])
+    capsys.readouterr()
+
+    (r,) = run(target, f"find {probe_dir} -type f | sort")
+    assert r.stdout.split() == [
+        "/home/bxhu/uts-live-probe/lib/a.py",
+        "/home/bxhu/uts-live-probe/lib/nested/b.py",
+    ]
+
+
+def test_push_refuses_to_overwrite_until_forced(target, tmp_path, probe_dir, capsys):
+    from uts.output import EXIT_BLOCKED
+
+    src = tmp_path / "once.txt"
+    src.write_text("first\n")
+    ws = str(tmp_path / "ws")
+
+    assert main(["--workspace", ws, "push", "test", str(src), f"{probe_dir}/"]) == EXIT_OK
+    capsys.readouterr()
+
+    src.write_text("second\n")
+    assert main(["--workspace", ws, "push", "test", str(src), f"{probe_dir}/"]) == EXIT_BLOCKED
+    assert "--force" in capsys.readouterr().out
+    (r,) = run(target, f"cat {probe_dir}/once.txt")
+    assert r.stdout == "first\n"          # the refusal really left it alone
+
+    assert main(["--workspace", ws, "push", "test", str(src),
+                 f"{probe_dir}/", "--force"]) == EXIT_OK
+    capsys.readouterr()
+    (r,) = run(target, f"cat {probe_dir}/once.txt")
+    assert r.stdout == "second\n"
+
+
+def test_push_dry_run_sends_nothing(target, tmp_path, probe_dir, capsys):
+    src = tmp_path / "ghost.txt"
+    src.write_text("should not arrive\n")
+    ws = tmp_path / "ws"
+
+    assert main(["--workspace", str(ws), "push", "test", str(src),
+                 f"{probe_dir}/", "--dry-run"]) == EXIT_OK
+    assert "dry-run" in capsys.readouterr().out
+
+    (r,) = run(target, f"test -e {probe_dir}/ghost.txt; echo $?")
+    assert r.stdout.strip() == "1"
+    assert not (ws / "manifest.jsonl").exists()
+
+
+def test_push_records_provenance_in_the_manifest(target, tmp_path, probe_dir, capsys):
+    src = tmp_path / "recorded.txt"
+    src.write_text("x\n")
+    ws = tmp_path / "ws"
+
+    main(["--workspace", str(ws), "push", "test", str(src), f"{probe_dir}/"])
+    capsys.readouterr()
+
+    entry = json.loads((ws / "manifest.jsonl").read_text().strip())
+    assert entry["direction"] == "push"
+    assert entry["remote_path"] == "/home/bxhu/uts-live-probe/recorded.txt"
+    assert entry["local_path"] == str(src)
+    assert "sent to it" in (ws / "INDEX.md").read_text()
+
+
 def test_path_spec_injection_is_blocked_before_any_connection(capsys):
     from uts.output import EXIT_BLOCKED
 

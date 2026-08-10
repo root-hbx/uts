@@ -58,11 +58,17 @@ class Workspace:
                     continue
         return out
 
-    def latest_per_file(self) -> dict[tuple[str, str], dict]:
-        """A file may be pulled repeatedly; keep only the last one."""
-        latest: dict[tuple[str, str], dict] = {}
+    def latest_per_file(self) -> dict[tuple[str, str, str], dict]:
+        """A path may be transferred repeatedly; keep only the last one.
+
+        Direction is part of the key: the same remote path can legitimately be both
+        somewhere we pushed to and somewhere we pulled from, and collapsing the two
+        would make the index claim one of them never happened. Entries written
+        before push existed carry no `direction` and are read as pulls.
+        """
+        latest: dict[tuple[str, str, str], dict] = {}
         for e in self.entries():
-            key = (e.get("host", "?"), e.get("remote_path", "?"))
+            key = (e.get("host", "?"), e.get("direction", "pull"), e.get("remote_path", "?"))
             prev = latest.get(key)
             if prev is None or e.get("fetched_at", 0) >= prev.get("fetched_at", 0):
                 latest[key] = e
@@ -86,30 +92,44 @@ class Workspace:
             self.index_path.write_text("\n".join(lines), encoding="utf-8")
             return self.index_path
 
-        by_host: dict[str, list[dict]] = {}
-        for (host, _), e in entries.items():
-            by_host.setdefault(host, []).append(e)
+        by_host: dict[str, dict[str, list[dict]]] = {}
+        for (host, direction, _), e in entries.items():
+            by_host.setdefault(host, {}).setdefault(direction, []).append(e)
 
         for host in sorted(by_host):
-            items = sorted(by_host[host], key=lambda e: e.get("remote_path", ""))
-            total = sum(e.get("size", 0) for e in items)
-            lines.append(f"## {host} — {plural(len(items), 'file')} / {human_bytes(total)}")
-            lines.append("")
-            lines.append("| Remote path | Size | Remote mtime | Fetched | Notes |")
-            lines.append("|---|---|---|---|---|")
-            for e in items:
-                note = []
-                if e.get("truncated"):
-                    note.append(f"first {e.get('lines')} lines only")
-                mtime = e.get("remote_mtime")
-                lines.append(
-                    f"| `{e.get('remote_path', '?')}` "
-                    f"| {human_bytes(e.get('size', 0))} "
-                    f"| {human_time(mtime) if mtime else '?'} "
-                    f"| {human_time(e.get('fetched_at', 0))} "
-                    f"| {' / '.join(note)} |"
+            for direction in ("pull", "push"):
+                items = sorted(
+                    by_host[host].get(direction, []), key=lambda e: e.get("remote_path", "")
                 )
-            lines.append("")
+                if not items:
+                    continue
+                total = sum(e.get("size", 0) for e in items)
+                verb = "fetched from" if direction == "pull" else "sent to"
+                lines.append(
+                    f"## {host} — {plural(len(items), 'file')} {verb} it / {human_bytes(total)}"
+                )
+                lines.append("")
+                lines.append(
+                    "| Remote path | Size | Remote mtime | Fetched | Notes |"
+                    if direction == "pull"
+                    else "| Remote path | Size | Local source | Sent | Notes |"
+                )
+                lines.append("|---|---|---|---|---|")
+                for e in items:
+                    note = []
+                    if e.get("truncated"):
+                        note.append(f"first {e.get('lines')} lines only")
+                    third = (
+                        human_time(e["remote_mtime"]) if e.get("remote_mtime") else "?"
+                    ) if direction == "pull" else f"`{e.get('local_path', '?')}`"
+                    lines.append(
+                        f"| `{e.get('remote_path', '?')}` "
+                        f"| {human_bytes(e.get('size', 0))} "
+                        f"| {third} "
+                        f"| {human_time(e.get('fetched_at', 0))} "
+                        f"| {' / '.join(note)} |"
+                    )
+                lines.append("")
 
         self.index_path.write_text("\n".join(lines), encoding="utf-8")
         return self.index_path
