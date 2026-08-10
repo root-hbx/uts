@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 
 from .conn import DEFAULT_EXEC_TIMEOUT, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limits
@@ -68,10 +69,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp_exec = sub.add_parser(
         "exec",
         help="run one command on the selected hosts",
-        description="Run one command concurrently. Destructive commands are blocked unless --write.",
+        description="Run one command concurrently. Destructive commands are blocked unless "
+                    "--write. Two forms: after `--` each argument is reproduced on the remote "
+                    "side exactly as typed (uts exec test -- pgrep -af 'sleep 600'); a single "
+                    "quoted string is handed to the remote shell as-is, which is what you want "
+                    "for pipes, redirection and globs (uts exec test 'ls ~/data/*.csv | wc -l').",
     )
     sp_exec.add_argument("selector", nargs="?", default="all")
-    sp_exec.add_argument("--write", action="store_true", help="allow destructive commands")
+    sp_exec.add_argument(
+        "--write", action="store_true",
+        help="allow destructive commands; accepted before or after the selector",
+    )
     sp_exec.add_argument(
         "argv", nargs=argparse.REMAINDER,
         help="the command to run; separate it with --, e.g. uts exec all -- ls -la",
@@ -126,14 +134,58 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _command_from_argv(argv: list[str]) -> str:
-    """Accepts both `-- ls -la` and `'ls -la'`."""
-    parts = argv[1:] if argv and argv[0] == "--" else argv
-    return " ".join(parts)
+EXEC_OWN_FLAGS = ("--write",)
+
+
+def split_exec_argv(argv: list[str], separator_used: bool = False) -> tuple[bool, str]:
+    """Split `exec`'s REMAINDER into (write, command).
+
+    argparse.REMAINDER swallows everything after the selector, flags included, so
+    `uts exec test --write -- rm x` used to send `--write` to the remote shell and
+    silently leave write mode off. Leading flags before the command are therefore
+    hoisted back out here. Anything after an explicit `--` belongs to the remote
+    command and is never touched, so `uts exec test -- mytool --write` still works.
+
+    Quoting is the other half. Joining the tokens with a plain space loses the
+    quotes the local shell already stripped, so `-- pgrep -af 'sleep 600'` arrives
+    as two arguments and fails. shlex.join reproduces the local argv verbatim on
+    the far side. The single-token form stays untouched: it is a shell snippet, and
+    quoting it would turn `'a | b'` into the name of a program to run.
+
+    `separator_used` has to be supplied by the caller from the untouched argv:
+    argparse eats the `--` in `exec test -- rm x` but leaves it in
+    `exec test --write -- rm x`, so by this point it is no longer a reliable signal
+    of what the user typed.
+    """
+    write = False
+    i = 0
+    while i < len(argv) and argv[i] in EXEC_OWN_FLAGS:
+        write = True  # only --write lives in EXEC_OWN_FLAGS today
+        i += 1
+    if i < len(argv) and argv[i] == "--":
+        separator_used = True
+        i += 1
+
+    parts = argv[i:]
+    # Buried in the middle with no `--` in sight, `--write` is far more likely to be
+    # a misplaced uts flag than an argument the remote program wants. Guessing either
+    # way would be wrong sometimes, so it is passed through with a note.
+    if not separator_used and any(flag in parts for flag in EXEC_OWN_FLAGS):
+        leaked = [flag for flag in EXEC_OWN_FLAGS if flag in parts]
+        print(
+            f"note: {', '.join(leaked)} was sent to the remote command, not read by uts.\n"
+            f"      Put it before the command: uts exec {leaked[0]} <selector> ...",
+            file=sys.stderr,
+        )
+
+    if len(parts) == 1:
+        return write, parts[0]
+    return write, shlex.join(parts)
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(raw_argv)
 
     try:
         inventory = load_inventory(args.hosts)
@@ -165,13 +217,14 @@ def main(argv: list[str] | None = None) -> int:
         limits = Limits(
             max_lines=args.max_lines, max_bytes=args.max_bytes, timeout=args.timeout
         )
+        hoisted_write, command = split_exec_argv(args.argv, separator_used="--" in raw_argv)
         return exec_cmd.run(
             selected,
-            _command_from_argv(args.argv),
+            command,
             args.jobs,
             limits,
             args.json,
-            args.write,
+            args.write or hoisted_write,
             args.max_cols,
         )
 
