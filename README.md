@@ -1,4 +1,4 @@
-## UTS
+# UTS
 
 > One machine runs the agent. Every machine is within its reach.
 
