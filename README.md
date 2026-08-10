@@ -41,6 +41,16 @@ Wrap path specs in **single quotes** — `~` and `*` have to reach the remote sh
 ./uts exec test --write 'rm -rf ~/scratch'    # writes are blocked until you say so
 ```
 
+**Long jobs** outlive the connection that started them:
+
+```bash
+./uts exec @gpu --detach -- python train.py --epochs 100
+./uts jobs @gpu                               # running / exited(0) / killed, with elapsed
+./uts logs a 7f3c1a --tail 100
+./uts kill a 7f3c1a
+./uts jobs @gpu --clean                       # remove the finished ones' state
+```
+
 **Sessions** carry `cd` and exported variables forward. They are opt-in, because a
 command whose meaning depends on invisible state is a command you cannot trust:
 

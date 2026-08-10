@@ -278,6 +278,170 @@ def parse_push_probe(stdout: str) -> dict:
     return out
 
 
+# ----------------------------------------------------------------------- jobs
+
+# Everything a detached job leaves behind lives here. It is the only footprint uts
+# has on the far side, it is plain files rather than anything running, and
+# `uts jobs --clean` removes it.
+JOBS_ROOT = '"$HOME/.uts/jobs"'
+
+
+def start_job(job_id: str, command: str, prefix: list[str] | None = None) -> str:
+    """Launch a command detached and report the pid it is actually running under.
+
+    The pid is recorded by the job itself (`echo $$`) rather than taken from `$!`.
+    setsid forks when the calling shell is already a process-group leader, which it
+    is here, so `$!` would be setsid's pid and not the job's — and every later
+    `kill -0` would then be asking about the wrong process.
+
+    Being a session leader also means $$ doubles as the process-group id, which is
+    what lets `uts kill` take down a whole pipeline rather than just its head.
+    """
+    d = f'"$HOME/.uts/jobs/{job_id}"'
+    inner = "\n".join([
+        f'echo $$ > {d}/pid',
+        # Without this a SIGTERM'd job leaves no rc, and `uts jobs` can only report
+        # that it is no longer there — indistinguishable from a reboot. 143 is the
+        # conventional 128+SIGTERM.
+        f"trap 'printf %s 143 > {d}/rc; exit 143' TERM",
+        *(prefix or []),
+        "{ " + command + "\n}; __uts_rc=$?",
+        f'printf %s "$__uts_rc" > {d}/rc',
+        "exit $__uts_rc",
+    ])
+    return f"""
+d={d}
+mkdir -p "$d" || exit 1
+printf '%s' {q(command)} > "$d/cmd"
+date +%s > "$d/started"
+if command -v setsid >/dev/null 2>&1; then
+  setsid sh -c {q(inner)} > "$d/log" 2>&1 < /dev/null &
+else
+  nohup sh -c {q(inner)} > "$d/log" 2>&1 < /dev/null &
+fi
+# The launcher returns before the job has written its pid; without this the answer
+# would be "started, pid unknown" most of the time.
+i=0
+while [ ! -s "$d/pid" ] && [ $i -lt 20 ]; do sleep 0.05; i=$((i+1)); done
+printf 'job\\t{job_id}\\t%s\\n' "$(cat "$d/pid" 2>/dev/null)"
+"""
+
+
+LIST_JOBS = r"""
+root="$HOME/.uts/jobs"
+printf 'now\t%s\n' "$(date +%s)"
+[ -d "$root" ] || exit 0
+for d in "$root"/*/; do
+  [ -d "$d" ] || continue
+  id=$(basename "$d")
+  pid=$(cat "$d/pid" 2>/dev/null)
+  rc=$(cat "$d/rc" 2>/dev/null)
+  started=$(cat "$d/started" 2>/dev/null)
+  cmd=$(head -c 300 "$d/cmd" 2>/dev/null | tr '\n\t' '  ')
+  if [ -n "$rc" ]; then
+    state="exited:$rc"
+  elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    state=running
+  else
+    state=vanished
+  fi
+  printf 'job\t%s\t%s\t%s\t%s\t%s\n' "$id" "$state" "${started:-0}" "${pid:-?}" "$cmd"
+done
+exit 0
+"""
+
+
+def list_jobs() -> str:
+    return LIST_JOBS
+
+
+def parse_jobs(stdout: str) -> tuple[float, list[dict]]:
+    """(remote clock, jobs). Elapsed has to be computed against the remote clock —
+    this whole tool exists partly because machine clocks disagree."""
+    now = 0.0
+    jobs = []
+    for line in stdout.splitlines():
+        parts = line.split("\t")
+        if parts[0] == "now" and len(parts) == 2:
+            try:
+                now = float(parts[1])
+            except ValueError:
+                pass
+        elif parts[0] == "job" and len(parts) == 6:
+            _, job_id, state, started, pid, cmd = parts
+            try:
+                started_at = float(started)
+            except ValueError:
+                started_at = 0.0
+            jobs.append({
+                "id": job_id, "state": state, "started": started_at,
+                "pid": pid, "command": cmd,
+            })
+    return now, jobs
+
+
+def job_log(job_id: str, tail: int) -> str:
+    d = f'"$HOME/.uts/jobs/{check_job_id(job_id)}"'
+    return f"""
+d={d}
+[ -d "$d" ] || {{ echo "no job {job_id} on this host" >&2; exit 1; }}
+tail -n {int(tail)} "$d/log"
+"""
+
+
+def kill_job(job_id: str, force: bool) -> str:
+    """Signal the job's whole process group, falling back to the single pid.
+
+    The group is the point: `python train.py | tee log` detached as one job leaves
+    two processes, and killing only the leader orphans the rest.
+    """
+    sig = "KILL" if force else "TERM"
+    d = f'"$HOME/.uts/jobs/{check_job_id(job_id)}"'
+    return f"""
+d={d}
+pid=$(cat "$d/pid" 2>/dev/null)
+[ -n "$pid" ] || {{ echo "no job {job_id} on this host" >&2; exit 1; }}
+if kill -{sig} -"$pid" 2>/dev/null || kill -{sig} "$pid" 2>/dev/null; then
+  printf 'signalled %s with SIG{sig} (pid %s)\\n' {q(job_id)} "$pid"
+else
+  echo "job {job_id} is no longer running (pid $pid)" >&2
+  exit 1
+fi
+"""
+
+
+CLEAN_JOBS = r"""
+root="$HOME/.uts/jobs"
+[ -d "$root" ] || { echo 0; exit 0; }
+n=0
+for d in "$root"/*/; do
+  [ -d "$d" ] || continue
+  pid=$(cat "$d/pid" 2>/dev/null)
+  if [ -f "$d/rc" ] || ! kill -0 "${pid:-0}" 2>/dev/null; then
+    rm -rf "$d" && n=$((n+1))
+  fi
+done
+echo "$n"
+"""
+
+
+def clean_jobs() -> str:
+    return CLEAN_JOBS
+
+
+_JOB_ID = re.compile(r"^[A-Za-z0-9]{1,32}$")
+
+
+def check_job_id(job_id: str) -> str:
+    """Job ids are interpolated into a path inside a shell snippet, so they are held
+    to the shape uts generates rather than merely quoted."""
+    if not _JOB_ID.match(job_id):
+        raise PathSpecError(
+            f"{job_id!r} is not a job id. They look like 7f3c1a — run `uts jobs` to list them."
+        )
+    return job_id
+
+
 # ------------------------------------------------------------------- sessions
 
 # `env -0` and `pwd` are appended after the user's command, so the reply has to be

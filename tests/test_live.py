@@ -335,6 +335,128 @@ def test_session_survives_across_processes(target, tmp_path, capsys):
     assert Session("keep", ws).cwd("test") == "/etc"
 
 
+# ------------------------------------------------------------------ detached jobs
+
+
+@pytest.fixture
+def no_jobs(target):
+    """Start and end with a clean job list, whichever way the test goes."""
+    main(["jobs", "test", "--clean"])
+    yield
+    main(["jobs", "test", "--clean"])
+
+
+def started_job_id(out: str) -> str:
+    return out.split("· job ")[1].split(" ")[0]
+
+
+def test_a_detached_job_outlives_the_connection(target, no_jobs, capsys):
+    import time
+
+    assert main(["exec", "test", "--detach", "--", "sh", "-c",
+                 "sleep 2; echo finished-later"]) == EXIT_OK
+    job = started_job_id(capsys.readouterr().out)
+
+    main(["jobs", "test"])
+    assert "running" in capsys.readouterr().out
+
+    time.sleep(4)                          # the SSH channel is long gone by now
+    main(["jobs", "test"])
+    assert "exited(0)" in capsys.readouterr().out
+    main(["logs", "test", job])
+    assert "finished-later" in capsys.readouterr().out
+
+
+def test_a_failing_job_keeps_its_exit_code(target, no_jobs, capsys):
+    import time
+
+    main(["exec", "test", "--detach", "--", "sh", "-c", "exit 7"])
+    capsys.readouterr()
+    time.sleep(2)
+    main(["jobs", "test"])
+    assert "exited(7)" in capsys.readouterr().out
+
+
+def test_killing_a_job_is_distinguishable_from_it_vanishing(target, no_jobs, capsys):
+    import time
+
+    main(["exec", "test", "--detach", "--", "sleep", "120"])
+    job = started_job_id(capsys.readouterr().out)
+    time.sleep(1)
+
+    assert main(["kill", "test", job]) == EXIT_OK
+    assert "SIGTERM" in capsys.readouterr().out
+    time.sleep(1)
+
+    main(["jobs", "test"])
+    assert "killed" in capsys.readouterr().out
+
+
+def test_kill_takes_down_the_whole_process_group(target, no_jobs, capsys):
+    import time
+
+    main(["exec", "test", "--detach", "--", "sh", "-c", "sleep 300 | cat"])
+    job = started_job_id(capsys.readouterr().out)
+    time.sleep(1)
+    main(["kill", "test", job])
+    capsys.readouterr()
+    time.sleep(1)
+
+    # The `sleep 300` is a child, not the job leader: signalling only the leader
+    # would leave it running.
+    (r,) = run(target, "pgrep -c 'sleep 300'")
+    assert r.stdout.strip() in ("", "0")
+
+
+def test_a_detached_job_inherits_the_sessions_cwd(target, tmp_path, no_jobs, capsys):
+    import time
+
+    ws = str(tmp_path / "ws")
+    main(["--workspace", ws, "exec", "test", "--session", "j", "cd /tmp"])
+    capsys.readouterr()
+
+    main(["--workspace", ws, "exec", "test", "--session", "j", "--detach", "--", "pwd"])
+    job = started_job_id(capsys.readouterr().out)
+    time.sleep(2)
+    main(["logs", "test", job])
+    assert "/tmp" in capsys.readouterr().out
+
+
+def test_clean_removes_finished_jobs_but_not_running_ones(target, no_jobs, capsys):
+    import time
+
+    main(["exec", "test", "--detach", "--", "true"])
+    capsys.readouterr()
+    main(["exec", "test", "--detach", "--", "sleep", "120"])
+    keep = started_job_id(capsys.readouterr().out)
+    time.sleep(2)
+
+    main(["jobs", "test", "--clean"])
+    assert "removed 1 finished job" in capsys.readouterr().out
+    main(["jobs", "test"])
+    out = capsys.readouterr().out
+    assert keep in out and out.count("\n") == 2      # header plus the survivor
+
+    main(["kill", "test", keep])
+    capsys.readouterr()
+
+
+def test_the_job_footprint_is_confined_and_removable(target, no_jobs, capsys):
+    import time
+
+    main(["exec", "test", "--detach", "--", "true"])
+    capsys.readouterr()
+    time.sleep(1)
+
+    (r,) = run(target, "ls -d ~/.uts/jobs/*/ 2>/dev/null | wc -l")
+    assert r.stdout.strip() == "1"
+
+    main(["jobs", "test", "--clean"])
+    capsys.readouterr()
+    (r,) = run(target, "ls -A ~/.uts/jobs 2>/dev/null | wc -l")
+    assert r.stdout.strip() == "0"
+
+
 def test_path_spec_injection_is_blocked_before_any_connection(capsys):
     from uts.output import EXIT_BLOCKED
 

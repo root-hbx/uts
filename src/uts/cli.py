@@ -95,8 +95,31 @@ def build_parser() -> argparse.ArgumentParser:
              "session; without it every command starts from a clean login",
     )
     sp_exec.add_argument(
+        "--detach", action="store_true",
+        help="start it in the background and return a job id; check on it with "
+             "uts jobs / uts logs / uts kill",
+    )
+    sp_exec.add_argument(
         "argv", nargs=argparse.REMAINDER,
         help="the command to run; separate it with --, e.g. uts exec all -- ls -la",
+    )
+
+    sp_jobs = sub.add_parser("jobs", help="list the detached jobs on the selected hosts")
+    sp_jobs.add_argument("selector", nargs="?", default="all")
+    sp_jobs.add_argument(
+        "--clean", action="store_true", help="remove the finished jobs' state on the remote side"
+    )
+
+    sp_logs = sub.add_parser("logs", help="show a detached job's output")
+    sp_logs.add_argument("selector")
+    sp_logs.add_argument("job_id", metavar="JOB-ID")
+    sp_logs.add_argument("--tail", type=int, default=50, help="last N lines, default 50")
+
+    sp_kill = sub.add_parser("kill", help="stop a detached job")
+    sp_kill.add_argument("selector")
+    sp_kill.add_argument("job_id", metavar="JOB-ID")
+    sp_kill.add_argument(
+        "--force", action="store_true", help="SIGKILL instead of SIGTERM"
     )
 
     sp_ls = sub.add_parser("ls", help="summarise a directory or glob: count, size, types, age")
@@ -184,6 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
 EXEC_OWN_FLAGS: dict[str, bool] = {
     "--write": False,
     "--session": True,
+    "--detach": False,
 }
 
 
@@ -261,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ALL_FAILED
 
     from .commands import browse, exec_cmd, hosts as hosts_cmd, peek as peek_cmd
-    from .commands import ping as ping_cmd, pull as pull_cmd, push as push_cmd
+    from .commands import jobs as jobs_cmd, ping as ping_cmd, pull as pull_cmd, push as push_cmd
 
     if args.command == "index":
         from .workspace import Workspace, plural
@@ -327,6 +351,23 @@ def main(argv: list[str] | None = None) -> int:
             args.max_cols,
             args.session or hoisted.get("--session"),
             args.workspace,
+            args.detach or bool(hoisted.get("--detach")),
+        )
+
+    if args.command == "jobs":
+        return jobs_cmd.run_jobs(selected, args.jobs, args.timeout, args.json, args.clean)
+
+    if args.command == "logs":
+        limits = Limits(
+            max_lines=args.max_lines, max_bytes=args.max_bytes, timeout=args.timeout
+        )
+        return jobs_cmd.run_logs(
+            selected, args.job_id, args.jobs, limits, args.json, args.tail, args.max_cols
+        )
+
+    if args.command == "kill":
+        return jobs_cmd.run_kill(
+            selected, args.job_id, args.jobs, args.timeout, args.json, args.force
         )
 
     if args.command == "ls":
