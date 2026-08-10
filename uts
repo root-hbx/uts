@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Entry shim: uv handles dependencies, so nothing needs installing first.
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec uv run --quiet --project "$DIR" uts "$@"

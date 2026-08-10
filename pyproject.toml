@@ -1,0 +1,24 @@
+[project]
+name = "uts"
+version = "0.1.0"
+description = "Let a single Claude-equipped laptop see and analyse logs on other machines over SSH"
+requires-python = ">=3.11"
+dependencies = ["paramiko>=3.4"]
+
+[project.scripts]
+uts = "uts.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/uts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: talks to the real test host over the network (deselect with -m 'not live')"]
+addopts = "-m 'not live'"

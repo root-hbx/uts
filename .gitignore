@@ -1,0 +1,37 @@
+# --- secrets -----------------------------------------------------------
+# Real inventory: contains plaintext passwords. Never commit it.
+# Copy hosts.example.json to hosts.json and fill it in locally.
+hosts.json
+
+# --- runtime data ------------------------------------------------------
+# Workspace of files pulled off remote machines. Other people's data,
+# regenerable at any time by `uts pull`.
+.uts/
+
+# --- python ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- environments ------------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- tooling caches ----------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- editors and OS ----------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
