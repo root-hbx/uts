@@ -1,10 +1,23 @@
-# uts
+## UTS
 
-Let the one laptop that has Claude on it reach the logs and data on every other
-machine in the subnet, over SSH — no more logging in one by one, downloading, and
-carrying files around on a USB stick.
+> One machine runs the agent. Every machine is within its reach.
 
-Nothing is installed on those machines. SSH is the handle.
+An AI agent is bounded by what it can see and that boundary is usually a single machine.
+
+**UTS** pushes it out to the edge of the subnet: deploy Claude Code/Codex/Gemini on one machine
+and it can survey, query and collect across all of them, including PC, COTS Server, **even** Proprietary Hardware Testbed.
+
+Nothing runs on the other side. No agent, no daemon, no installed package.
+SSH is the only thing required for each server.
+
+<h3 align="center">
+    Unifying The Sky: One Claude/Codex/Gemini Deployment, Multiple Backends Support
+</h3>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./uts.svg">
+  <img src="./uts.svg" alt="UTS Demo">
+</picture>
 
 ## Quick start
 
