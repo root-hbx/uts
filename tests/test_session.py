@@ -8,7 +8,7 @@ the state report begins has to survive output that looks like a state report.
 import pytest
 
 from uts import remote
-from uts.cli import build_parser, join_command
+from uts.cli import build_parser, one_command
 from uts.session import Session, env_delta
 
 
@@ -30,23 +30,24 @@ def wrap_and_parse(command, cwd=None, env=None, tail="/srv\036HOME=/root\0"):
 @pytest.mark.parametrize(
     "args",
     [
-        ["exec", "-H", "t", "--session", "s1", "--", "pwd"],
-        ["exec", "-H", "t", "-s", "s1", "--", "pwd"],
-        ["exec", "-H", "t", "--session=s1", "--", "pwd"],
-        ["exec", "--session", "s1", "-H", "t", "--", "pwd"],
-        ["exec", "-H", "t", "--write", "-s", "s1", "--", "pwd"],
+        ["exec", "-H", "t", "--session", "s1", "pwd"],
+        ["exec", "-H", "t", "-s", "s1", "pwd"],
+        ["exec", "-H", "t", "--session=s1", "pwd"],
+        ["exec", "--session", "s1", "-H", "t", "pwd"],
+        ["exec", "-H", "t", "--write", "-s", "s1", "pwd"],
+        ["exec", "-H", "t", "pwd", "-s", "s1"],
     ],
 )
 def test_the_session_name_is_read_by_uts_not_sent_remote(args):
     ns = parse(args)
     assert ns.session == "s1"
-    assert join_command(ns.argv) == "pwd"
+    assert one_command(ns.command_, "exec") == "pwd"
 
 
-def test_session_after_the_separator_belongs_to_the_remote_command():
-    ns = parse(["exec", "-H", "t", "--", "mytool", "--session", "x"])
+def test_session_inside_the_string_belongs_to_the_remote_command():
+    ns = parse(["exec", "-H", "t", "mytool --session x"])
     assert ns.session is None
-    assert join_command(ns.argv) == "mytool --session x"
+    assert one_command(ns.command_, "exec") == "mytool --session x"
 
 
 def test_dangling_session_flag_is_a_usage_error():
@@ -81,9 +82,9 @@ def test_the_users_rc_survives_the_trailer():
 
 def test_no_session_means_the_command_string_is_untouched():
     # The whole point of opt-in: without a session name nothing wraps anything.
-    ns = parse(["exec", "-H", "t", "--", "echo", "hi"])
+    ns = parse(["exec", "-H", "t", "echo hi"])
     assert ns.session is None
-    assert join_command(ns.argv) == "echo hi"
+    assert one_command(ns.command_, "exec") == "echo hi"
 
 
 # ------------------------------------------------------------------ reading it back

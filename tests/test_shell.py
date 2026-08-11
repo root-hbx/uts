@@ -5,7 +5,7 @@ and the two ways an agent reaches it wrongly both end in a silent wait rather th
 an error. A tool that appears to freeze teaches nothing.
 """
 
-from uts.cli import build_parser, join_command
+from uts.cli import build_parser, one_command
 from uts.commands import shell
 from uts.inventory import Host
 from uts.output import EXIT_BLOCKED
@@ -43,16 +43,16 @@ def parse(args):
 
 
 def test_pty_flags_are_read_by_uts_not_sent_remote():
-    ns = parse(["exec", "-H", "t", "--pty", "--duration", "3", "--", "btop"])
+    ns = parse(["exec", "-H", "t", "--pty", "--duration", "3", "btop"])
     assert (ns.pty, ns.duration) == (True, 3.0)
-    assert join_command(ns.argv) == "btop"
+    assert one_command(ns.command_, "exec") == "btop"
 
 
 def test_duration_accepts_the_equals_form():
-    assert parse(["exec", "-H", "t", "--duration=2.5", "--", "btop"]).duration == 2.5
+    assert parse(["exec", "-H", "t", "--duration=2.5", "btop"]).duration == 2.5
 
 
-def test_pty_after_the_separator_belongs_to_the_remote_command():
-    ns = parse(["exec", "-H", "t", "--", "mytool", "--pty"])
+def test_pty_inside_the_string_belongs_to_the_remote_command():
+    ns = parse(["exec", "-H", "t", "mytool --pty"])
     assert ns.pty is False
-    assert join_command(ns.argv) == "mytool --pty"
+    assert one_command(ns.command_, "exec") == "mytool --pty"

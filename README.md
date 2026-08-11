@@ -26,6 +26,8 @@ SSH is the only thing required for each server.
 Every command that touches the network says who it is talking to, by the `name` in
 `hosts.json`. There is no default: `-H` for some, `-a` for all.
 
+**(1) Basic Commands:**
+
 ```bash
 ./uts hosts                                   # what the names are
 ./uts status -a                               # are the machines alive
@@ -43,13 +45,19 @@ Every command that touches the network says who it is talking to, by the `name` 
 
 ```bash
 ./uts push -H gpu-01 ./setup.sh ./lib --to '~/bin/'   # --force to overwrite
-./uts exec -a -- nvidia-smi                           # one command, everywhere, at once
+```
+
+**(2) Remote Execution:**
+
+```bash
+./uts exec -a 'nvidia-smi'                            # one command, everywhere, at once
+./uts exec -a 'ls ~/data/*.csv | wc -l'               # the pipe runs on that side
 ./uts exec -H gpu-01 --write 'rm -rf ~/scratch'       # writes are blocked until you say so
 ```
 
-**Sessions** are the handle for anything longer than one command. A name carries
-`cd` and exported variables forward, and it is also what the background job runs
-under — so there is one name to remember, not a name and an id:
+**(3) Session Management:**
+
+`Sessions` are the handle for anything longer than one command.
 
 ```bash
 ./uts exec -H gpu-01 -s build 'cd ~/proj && . .venv/bin/activate'
@@ -60,10 +68,12 @@ under — so there is one name to remember, not a name and an id:
 Sessions are opt-in, because a command whose meaning depends on invisible state is
 a command you cannot trust. Without `-s`, every command starts from a clean login.
 
+**(4) Tasks/Jobs Management:**
+
 **Work that outlives the connection** starts in a session and stays there:
 
 ```bash
-./uts start -H gpu-01 -s train -- python train.py --epochs 100
+./uts start -H gpu-01 -s train 'python train.py --epochs 100'
 ./uts ps -a                                    # running / exited(0) / killed / idle
 ./uts logs -H gpu-01 -s train --tail 100
 ./uts stop -H gpu-01 -s train
@@ -81,13 +91,12 @@ A session runs one thing at a time: `uts start` on a name that is already runnin
 is refused rather than doubled, and reusing a finished name needs `--force`,
 because it discards the log that says how the last run went.
 
-**Terminals**, for the programs that insist on one:
+**(5) Interactive Terminals:**
+
+For the programs that insist on one:
 
 ```bash
-./uts exec -H gpu-01 --pty -- sudo systemctl status ssh
-./uts exec -H gpu-01 --pty --duration 3 -- btop   # full-screen program → one frame
+./uts exec -H gpu-01 --pty 'sudo systemctl status ssh'
+./uts exec -H gpu-01 --pty --duration 3 'btop'    # full-screen program → one frame
 ./uts shell -H gpu-01                             # interactive, one host, for a person
 ```
-
-`./uts` is a shim that uses `uv` to install dependencies, so there is no
-`pip install` step.

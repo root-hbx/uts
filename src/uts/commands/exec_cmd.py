@@ -32,7 +32,7 @@ def run(
 ) -> int:
     command = command.strip()
     if not command:
-        print("no command given. Usage: uts exec -a -- ls -la /var/log", file=sys.stderr)
+        print("no command given. Usage: uts exec -a 'ls -la /var/log'", file=sys.stderr)
         return EXIT_BLOCKED
 
     if not write:

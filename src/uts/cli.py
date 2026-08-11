@@ -10,7 +10,7 @@ from .conn import DEFAULT_EXEC_TIMEOUT, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Li
 from .inventory import InventoryError, load_inventory, select
 from .commands.pull import DEFAULT_MAX_SIZE as PULL_DEFAULT_MAX_SIZE
 from .commands.push import DEFAULT_MAX_SIZE as PUSH_DEFAULT_MAX_SIZE
-from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED
+from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED, EXIT_BLOCKED
 
 EPILOG = """\
 choosing hosts -- everything that touches the network takes one of these:
@@ -30,15 +30,17 @@ typical flow -- look around, narrow down, then fetch:
 the other direction:
   uts push -H a ./setup.sh ./lib --to '~/bin/'  send files out; --force to overwrite
 
-running things:
-  uts exec -H a -- nvidia-smi                   one command, and you wait for it
+running things -- the command is always one quoted string:
+  uts exec -H a 'nvidia-smi'                    one command, and you wait for it
+  uts exec -H a 'ls ~/data/*.csv | wc -l'       pipes and globs, run on that side
   uts exec -H a -s build 'cd ~/proj'            -s carries cwd and exports forward
-  uts start -H a -s train -- python train.py    same name, now in the background
+  uts start -H a -s train 'python train.py'     same name, now in the background
   uts ps -a                                     what each session is doing
   uts logs -H a -s train --tail 100
   uts stop -H a -s train
 
-Quote path specs in single quotes: `~` and `*` are expanded by the remote shell.
+Quote path specs and commands in single quotes: `~`, `*` and `|` are for the remote
+shell, not this one.
 """
 
 
@@ -176,11 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_exec = sub.add_parser(
         "exec", parents=[target],
         help="run one command on the selected hosts",
-        description="Run one command concurrently. Destructive commands are blocked unless "
-                    "--write. Two forms: after `--` each argument is reproduced on the remote "
-                    "side exactly as typed (uts exec -H a -- pgrep -af 'sleep 600'); a single "
-                    "quoted string is handed to the remote shell as-is, which is what you want "
-                    "for pipes, redirection and globs (uts exec -H a 'ls ~/data/*.csv | wc -l').",
+        description="Run one command concurrently. The command is one quoted string, handed "
+                    "to the remote shell as-is -- so pipes, redirection and globs work the way "
+                    "they read (uts exec -H a 'ls ~/data/*.csv | wc -l'). Destructive commands "
+                    "are blocked unless --write.",
     )
     sp_exec.add_argument(
         "--write", action="store_true", help="allow destructive commands",
@@ -200,9 +201,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --pty: let a full-screen program (btop, htop) paint for S seconds, "
              "then return the screen it drew as text",
     )
+    # dest is `command_`: the subparsers already own `command` as the subcommand name.
     sp_exec.add_argument(
-        "argv", nargs=argparse.REMAINDER,
-        help="the command to run; separate it with --, e.g. uts exec -a -- ls -la",
+        "command_", metavar="COMMAND", nargs="*",
+        help="the command, as one quoted string: uts exec -a 'ls -la /var/log'",
     )
 
     sub.add_parser(
@@ -215,7 +217,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp_start = sub.add_parser(
         "start", parents=[target],
         help="run a command in the background, under a name you choose",
-        description="The command outlives this call and the connection that made it. "
+        description="One quoted string, same as uts exec. The command outlives this call "
+                    "and the connection that made it. "
                     "The session name is the handle for everything afterwards: "
                     "uts ps, uts logs -s NAME, uts stop -s NAME. If that session "
                     "already carries a cwd and exports from uts exec -s NAME, the job "
@@ -233,8 +236,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="reuse a session name whose last run has finished, discarding its log",
     )
     sp_start.add_argument(
-        "argv", nargs=argparse.REMAINDER,
-        help="the command to run; separate it with --",
+        "command_", metavar="COMMAND", nargs="*",
+        help="the command, as one quoted string: uts start -H a -s train 'python train.py'",
     )
 
     sp_ps = sub.add_parser(
@@ -266,46 +269,39 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-# uts's own flags. Once the command has started, one of these is far more likely to
-# be misplaced than meant for the remote program — but only far more likely, so it
-# is passed through with a note rather than intercepted.
-UTS_FLAGS = (
-    "-H", "--host", "-a", "--all", "--write", "-s", "--session", "--pty", "--duration",
-    "--inventory", "--jobs", "--timeout", "--max-lines", "--max-bytes", "--max-cols",
-    "--json", "--workspace",
-)
+def quote_for_display(command: str) -> str:
+    """Wrap a command the way the user would have to type it, for an error message."""
+    return f'"{command}"' if "'" in command else f"'{command}'"
 
 
-def join_command(argv: list[str]) -> str:
-    """Turn `exec`'s REMAINDER into the single string that reaches the remote shell.
+def one_command(parts: list[str], subcommand: str) -> str | None:
+    """The command `exec` and `start` send is exactly one string, or it is an error.
 
-    Two forms, and they are not interchangeable. After `--`, the tokens are rejoined
-    with shlex.join so the remote argv matches the local one: the local shell has
-    already stripped the quotes, and joining on spaces would hand
-    `-- pgrep -af 'sleep 600'` two patterns instead of one. A lone string is passed
-    through untouched, because quoting it would turn `a | b` into the name of a
-    program to run.
+    One form, not two. The v2 `--` form rejoined argv with shlex.join so the remote
+    argv matched the local one; it earned that by being a REMAINDER, which also
+    swallowed every uts flag typed after the command -- `uts exec -a 'ls' --pty` ran
+    `ls --pty` on the far side and could only warn about it afterwards. A plain
+    positional makes exec and start parse like every other subcommand, and what you
+    quote is exactly what the remote shell gets, so pipes, redirection and globs need
+    no second set of rules.
 
-    The separator survives in argv only because no positional precedes the
-    REMAINDER any more; back when a host selector did, argparse ate it in one
-    position and kept it in the other.
+    The cost is that inner quoting is now yours to write: `-- pgrep -af 'sleep 600'`
+    becomes `"pgrep -af 'sleep 600'"`. Which is why the error below hands back the
+    rewritten command rather than merely refusing.
     """
-    separator = bool(argv) and argv[0] == "--"
-    parts = argv[1:] if separator else list(argv)
-
-    if not separator:
-        leaked = [flag for flag in UTS_FLAGS if flag in " ".join(parts).split()]
-        if leaked:
-            print(
-                f"note: {', '.join(leaked)} was sent to the remote command, not read by uts.\n"
-                f"      uts's own flags go before the command: "
-                f"uts exec -H <name> {leaked[0]} ... -- <command>",
-                file=sys.stderr,
-            )
-
+    if not parts:
+        return ""  # the subcommand turns this into its own usage error
     if len(parts) == 1:
         return parts[0]
-    return shlex.join(parts)
+
+    rewritten = quote_for_display(shlex.join(parts))
+    print(
+        f"uts {subcommand} takes the command as one quoted string, not as separate "
+        f"arguments.\n"
+        f"      try:  uts {subcommand} ... {rewritten}",
+        file=sys.stderr,
+    )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -348,12 +344,15 @@ def main(argv: list[str] | None = None) -> int:
         return status_cmd.run(selected, args.jobs, args.timeout, args.json)
 
     if args.command == "exec":
+        command = one_command(args.command_, "exec")
+        if command is None:
+            return EXIT_BLOCKED
         limits = Limits(
             max_lines=args.max_lines, max_bytes=args.max_bytes, timeout=args.timeout
         )
         return exec_cmd.run(
             selected,
-            join_command(args.argv),
+            command,
             args.jobs,
             limits,
             args.json,
@@ -371,11 +370,14 @@ def main(argv: list[str] | None = None) -> int:
         return shell_cmd.run(selected)
 
     if args.command == "start":
+        command = one_command(args.command_, "start")
+        if command is None:
+            return EXIT_BLOCKED
         limits = Limits(
             max_lines=args.max_lines, max_bytes=args.max_bytes, timeout=args.timeout
         )
         return sessions_cmd.run_start(
-            selected, join_command(args.argv), args.session, args.jobs, limits,
+            selected, command, args.session, args.jobs, limits,
             args.json, args.write, args.force, args.workspace,
         )
 

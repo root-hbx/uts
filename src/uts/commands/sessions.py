@@ -48,7 +48,7 @@ def run_start(
     command = command.strip()
     if not command:
         print(
-            "no command given. Usage: uts start -H <name> -s <session> -- python train.py",
+            "no command given. Usage: uts start -H <name> -s <session> 'python train.py'",
             file=sys.stderr,
         )
         return EXIT_BLOCKED
@@ -286,7 +286,7 @@ def _render_table(results: list[Result]) -> str:
     if not rows:
         return (
             "nothing running, and no session state.\n"
-            "Start one with: uts start -H <name> -s <session> -- <command>"
+            "Start one with: uts start -H <name> -s <session> '<command>'"
         )
 
     headers = ("SESSION", "HOST", "STATE", "ELAPSED", "CWD")

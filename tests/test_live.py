@@ -72,7 +72,7 @@ def test_facts_probe_reports_a_clock_skew(target, capsys):
 
 
 def test_guard_blocks_without_touching_the_network(target, capsys):
-    assert main(["exec", "-H", "test", "--", "rm", "-rf", "/tmp/nope"]) != EXIT_OK
+    assert main(["exec", "-H", "test", "rm -rf /tmp/nope"]) != EXIT_OK
     assert "blocked:" in capsys.readouterr().err
 
 
@@ -89,8 +89,8 @@ def test_wrong_password_reports_auth_failure(target, tmp_path):
 
 
 def test_exit_codes_against_the_real_host(target, capsys):
-    assert main(["exec", "-H", "test", "--", "true"]) == EXIT_OK
-    assert main(["exec", "-H", "test", "--", "false"]) == EXIT_REMOTE_NONZERO
+    assert main(["exec", "-H", "test", "true"]) == EXIT_OK
+    assert main(["exec", "-H", "test", "false"]) == EXIT_REMOTE_NONZERO
     capsys.readouterr()
 
 
@@ -348,8 +348,7 @@ def no_jobs(target, tmp_path_factory):
 def test_a_started_session_outlives_the_connection(target, no_jobs, capsys):
     import time
 
-    assert main(["start", "-H", "test", "-s", "outlive", "--", "sh", "-c",
-                 "sleep 2; echo finished-later"]) == EXIT_OK
+    assert main(["start", "-H", "test", "-s", "outlive", "sh -c 'sleep 2; echo finished-later'"]) == EXIT_OK
     assert "session outlive" in capsys.readouterr().out
 
     main(["ps", "-H", "test"])
@@ -365,7 +364,7 @@ def test_a_started_session_outlives_the_connection(target, no_jobs, capsys):
 def test_a_failing_session_keeps_its_exit_code(target, no_jobs, capsys):
     import time
 
-    main(["start", "-H", "test", "-s", "failing", "--", "sh", "-c", "exit 7"])
+    main(["start", "-H", "test", "-s", "failing", "sh -c 'exit 7'"])
     capsys.readouterr()
     time.sleep(2)
     main(["ps", "-H", "test"])
@@ -375,7 +374,7 @@ def test_a_failing_session_keeps_its_exit_code(target, no_jobs, capsys):
 def test_stopping_a_session_is_distinguishable_from_it_vanishing(target, no_jobs, capsys):
     import time
 
-    main(["start", "-H", "test", "-s", "stopme", "--", "sleep", "120"])
+    main(["start", "-H", "test", "-s", "stopme", "sleep 120"])
     capsys.readouterr()
     time.sleep(1)
 
@@ -390,7 +389,7 @@ def test_stopping_a_session_is_distinguishable_from_it_vanishing(target, no_jobs
 def test_stop_takes_down_the_whole_process_group(target, no_jobs, capsys):
     import time
 
-    main(["start", "-H", "test", "-s", "pipeline", "--", "sh", "-c", "sleep 300 | cat"])
+    main(["start", "-H", "test", "-s", "pipeline", "sh -c 'sleep 300 | cat'"])
     capsys.readouterr()
     time.sleep(1)
     main(["stop", "-H", "test", "-s", "pipeline"])
@@ -412,7 +411,7 @@ def test_a_started_session_inherits_the_cwd_of_its_own_name(target, no_jobs, cap
     main(["--workspace", ws, "exec", "-H", "test", "-s", "j", "cd /tmp"])
     capsys.readouterr()
 
-    main(["--workspace", ws, "start", "-H", "test", "-s", "j", "--", "pwd"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "j", "pwd"])
     capsys.readouterr()
     time.sleep(2)
     main(["logs", "-H", "test", "-s", "j"])
@@ -424,11 +423,11 @@ def test_a_running_session_name_is_not_started_over(target, no_jobs, capsys):
 
     import time
 
-    main(["start", "-H", "test", "-s", "busy", "--", "sleep", "120"])
+    main(["start", "-H", "test", "-s", "busy", "sleep 120"])
     capsys.readouterr()
     time.sleep(1)
 
-    assert main(["start", "-H", "test", "-s", "busy", "--", "echo", "second"]) == EXIT_BLOCKED
+    assert main(["start", "-H", "test", "-s", "busy", "echo second"]) == EXIT_BLOCKED
     assert "already running" in capsys.readouterr().out
 
     main(["stop", "-H", "test", "-s", "busy"])
@@ -440,17 +439,16 @@ def test_a_finished_session_name_needs_force_before_its_log_goes(target, no_jobs
 
     import time
 
-    main(["start", "-H", "test", "-s", "reuse", "--", "sh", "-c", "echo first-run"])
+    main(["start", "-H", "test", "-s", "reuse", "sh -c 'echo first-run'"])
     capsys.readouterr()
     time.sleep(2)
 
-    assert main(["start", "-H", "test", "-s", "reuse", "--", "echo", "x"]) == EXIT_BLOCKED
+    assert main(["start", "-H", "test", "-s", "reuse", "echo x"]) == EXIT_BLOCKED
     assert "--force" in capsys.readouterr().out
     main(["logs", "-H", "test", "-s", "reuse"])
     assert "first-run" in capsys.readouterr().out      # the refusal kept it
 
-    assert main(["start", "-H", "test", "-s", "reuse", "--force", "--",
-                 "sh", "-c", "echo second-run"]) == EXIT_OK
+    assert main(["start", "-H", "test", "-s", "reuse", "--force", "sh -c 'echo second-run'"]) == EXIT_OK
     capsys.readouterr()
     time.sleep(2)
     main(["logs", "-H", "test", "-s", "reuse"])
@@ -462,9 +460,9 @@ def test_clean_removes_finished_sessions_but_not_running_ones(target, no_jobs, c
     import time
 
     ws = no_jobs
-    main(["--workspace", ws, "start", "-H", "test", "-s", "done", "--", "true"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "done", "true"])
     capsys.readouterr()
-    main(["--workspace", ws, "start", "-H", "test", "-s", "keep", "--", "sleep", "120"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "keep", "sleep 120"])
     capsys.readouterr()
     time.sleep(2)
 
@@ -489,7 +487,7 @@ def test_clean_forgets_both_halves_of_a_session(target, no_jobs, capsys):
 
     ws = no_jobs
     main(["--workspace", ws, "exec", "-H", "test", "-s", "both", "cd /tmp"])
-    main(["--workspace", ws, "start", "-H", "test", "-s", "both", "--", "true"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "both", "true"])
     capsys.readouterr()
     time.sleep(2)
     assert Session("both", ws).cwd("test") == "/tmp"
@@ -522,7 +520,7 @@ def test_clean_by_name_forgets_an_idle_session(target, no_jobs, capsys):
 def test_ps_shows_an_idle_session_next_to_a_running_one(target, no_jobs, capsys):
     ws = no_jobs
     main(["--workspace", ws, "exec", "-H", "test", "-s", "parked", "cd /etc"])
-    main(["--workspace", ws, "start", "-H", "test", "-s", "busy2", "--", "sleep", "60"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "busy2", "sleep 60"])
     capsys.readouterr()
 
     main(["--workspace", ws, "ps", "-H", "test"])
@@ -543,7 +541,7 @@ def test_ps_on_an_empty_host_is_not_an_error(target, no_jobs, capsys):
 def test_the_session_footprint_is_confined_and_removable(target, no_jobs, capsys):
     import time
 
-    main(["start", "-H", "test", "-s", "footprint", "--", "true"])
+    main(["start", "-H", "test", "-s", "footprint", "true"])
     capsys.readouterr()
     time.sleep(1)
 
@@ -595,7 +593,7 @@ def test_pty_preserves_the_exit_code(target, capsys):
 def test_a_full_screen_program_comes_back_as_a_readable_frame(target, capsys):
     # The original "uts cannot do this": btop refuses to start without a terminal,
     # and even with one it paints rather than prints.
-    code = main(["--max-cols", "0", "exec", "-H", "test", "--pty", "--duration", "3", "--", "btop"])
+    code = main(["--max-cols", "0", "exec", "-H", "test", "--pty", "--duration", "3", "btop"])
     out = capsys.readouterr().out
     assert code == EXIT_OK
     assert "No tty detected" not in out
@@ -609,7 +607,7 @@ def test_a_background_session_has_no_terminal_to_attach(target, capsys):
     # something in the background is a different verb now, and it has no --pty:
     # nobody would be reading the terminal it drew.
     with pytest.raises(SystemExit):
-        main(["start", "-H", "test", "-s", "nopty", "--pty", "--", "btop"])
+        main(["start", "-H", "test", "-s", "nopty", "--pty", "btop"])
 
 
 def test_pty_runs_inside_a_session(target, tmp_path, capsys):

@@ -28,7 +28,7 @@ def run(hosts: list[Host]) -> int:
         print(
             f"shell needs exactly one host, this selection has {len(hosts)}: {names}\n"
             f"Name one with -H, or run something on all of them at once with: "
-            f"uts exec -a -- <command>",
+            f"uts exec -a '<command>'",
             file=sys.stderr,
         )
         return EXIT_BLOCKED
@@ -37,9 +37,9 @@ def run(hosts: list[Host]) -> int:
         print(
             "shell needs a terminal, and this one is a pipe.\n"
             "For a one-shot command with a pty behind it: "
-            "uts exec -H <name> --pty -- <command>\n"
+            "uts exec -H <name> --pty '<command>'\n"
             "For a full-screen program rendered as one frame: "
-            "uts exec -H <name> --pty --duration 3 -- btop",
+            "uts exec -H <name> --pty --duration 3 'btop'",
             file=sys.stderr,
         )
         return EXIT_BLOCKED

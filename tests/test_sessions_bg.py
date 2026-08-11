@@ -8,7 +8,7 @@ and a separate `--session build` is now a single handle.
 import pytest
 
 from uts import remote
-from uts.cli import build_parser, join_command
+from uts.cli import build_parser, one_command
 from uts.commands.sessions import _elapsed, _render_table, _state
 from uts.conn import Result
 from uts.inventory import Host
@@ -27,15 +27,24 @@ def parse(args):
 
 
 def test_start_names_the_session_and_keeps_the_command_intact():
-    ns = parse(["start", "-H", "t", "-s", "train", "--", "python", "train.py", "--epochs", "100"])
+    ns = parse(["start", "-H", "t", "-s", "train", "python train.py --epochs 100"])
     assert ns.session == "train"
-    assert join_command(ns.argv) == "python train.py --epochs 100"
+    assert one_command(ns.command_, "start") == "python train.py --epochs 100"
+
+
+def test_start_takes_the_command_the_same_way_exec_does():
+    # One rule across both, which is the whole point of the single positional:
+    # --epochs is the remote program's because it is inside the quotes, and
+    # --force is uts's because it is not.
+    ns = parse(["start", "-H", "t", "-s", "train", "python train.py --epochs 100", "--force"])
+    assert ns.force is True
+    assert one_command(ns.command_, "start") == "python train.py --epochs 100"
 
 
 def test_start_without_a_name_is_refused():
     # The name is the handle for logs and stop; there is nothing to fall back to.
     with pytest.raises(SystemExit):
-        parse(["start", "-H", "t", "--", "python", "train.py"])
+        parse(["start", "-H", "t", "python train.py"])
 
 
 @pytest.mark.parametrize("command", ["logs", "stop"])
