@@ -76,3 +76,38 @@ command yourself.
 The cost is that a terminal is a single stream: `stderr` comes back
 merged into `stdout`, so leave `--pty` off for daily use.
 
+**(5) Output For Programs:**
+
+`--json` prints **one envelope on stdout, on every exit path** — including the ones
+that fail before anything connects. It works on either side of the verb.
+
+```bash
+./uts status -a --json
+./uts --json status -a         # the same
+```
+
+```json
+{ "uts": 1, "command": "status", "ok": true, "exit": 0, "hosts": [ … ] }
+{ "uts": 1, "command": "exec", "ok": false, "exit": 4,
+  "error": { "kind": "blocked", "message": "blocked: rm deletes files…" }, "hosts": [] }
+```
+
+`ok` is exactly `exit == 0`, `exit` always equals the process exit code, and `hosts`
+is `[]` when nothing was sent. `error.kind` is `usage` (fix the arguments), `blocked`
+(add `--write` if you meant it) or `inventory` (check `uts hosts`).
+
+Exit codes never overlap, which is the point:
+
+| | |
+|---|---|
+| `0` | everything worked |
+| `1` | every host reachable, the remote command returned non-zero |
+| `2` | **partial** — some hosts unreachable or refused, others fine |
+| `3` | every host unreachable, or the inventory is broken |
+| `4` | nothing was sent: guard, usage error, or a size cap |
+
+Per-host objects carry the transport result (`reachable rc stdout stderr truncated
+aborted error refused`) with that subcommand's own answer flattened on top. The full
+per-command key list is in
+[`.claude/skills/uts/references/json.md`](../.claude/skills/uts/references/json.md).
+

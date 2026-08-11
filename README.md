@@ -54,7 +54,18 @@ Every command that touches the network says who it is talking to, by the `name` 
 ./uts push -H test-a ./setup.sh ./lib --to '~/bin/'   # --force to overwrite
 ```
 
-**(2) Further Development:**
+**(2) Let the agent use it:**
+
+```bash
+./install-skill    # links the skill into ~/.claude/skills and uts onto your PATH
+```
+
+Then open Claude Code **in any project** and ask about a machine — "are my boxes up",
+"how far along is the training run on the GPU host" — without mentioning uts. Both
+links point back at this checkout, so editing the code or the skill takes effect
+immediately.
+
+**(3) Further Development:**
 
 See [User Manual](./docs/manual.md).
 

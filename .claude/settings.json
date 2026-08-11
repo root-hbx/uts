@@ -1,0 +1,31 @@
+{
+  "$comment": [
+    "The line between looking and acting, in one place.",
+    "Read-only subcommands run without a prompt so an agent can survey freely.",
+    "exec, start, push, pull, stop and anything with --write are absent on purpose:",
+    "they change something on the far side, or land files here, and each one should",
+    "surface. guard.py already refuses destructive commands without --write; this is",
+    "the second half of the same idea, at the point where the command is issued."
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(uts hosts:*)",
+      "Bash(uts status:*)",
+      "Bash(uts ls:*)",
+      "Bash(uts find:*)",
+      "Bash(uts peek:*)",
+      "Bash(uts ps:*)",
+      "Bash(uts logs:*)",
+      "Bash(uts index:*)",
+      "Bash(./uts hosts:*)",
+      "Bash(./uts status:*)",
+      "Bash(./uts ls:*)",
+      "Bash(./uts find:*)",
+      "Bash(./uts peek:*)",
+      "Bash(./uts ps:*)",
+      "Bash(./uts logs:*)",
+      "Bash(./uts index:*)",
+      "Bash(.venv/bin/python -m pytest:*)"
+    ]
+  }
+}
