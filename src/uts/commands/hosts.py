@@ -2,25 +2,18 @@
 
 from __future__ import annotations
 
-import json
-
 from ..inventory import Host
-from ..output import plural
+from ..output import EXIT_OK, envelope, plural
 
 
 def run(hosts: list[Host], as_json: bool) -> int:
     if as_json:
-        print(
-            json.dumps(
-                [
-                    {"name": h.name, "ip": h.ip, "user": h.user, "port": h.port}
-                    for h in hosts
-                ],
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-        return 0
+        # No password: this is the one command whose whole output is the inventory,
+        # and an agent reading it has no use for the credential.
+        print(envelope("hosts", EXIT_OK, [
+            {"name": h.name, "ip": h.ip, "user": h.user, "port": h.port} for h in hosts
+        ]))
+        return EXIT_OK
 
     name_w = max(len(h.name) for h in hosts)
     addr_w = max(len(f"{h.user}@{h.ip}:{h.port}") for h in hosts)

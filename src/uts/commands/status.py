@@ -7,11 +7,9 @@ order you infer. So it is measured every time and warned about past a threshold.
 
 from __future__ import annotations
 
-import json
-
 from ..conn import Limits, Result, run_many
 from ..inventory import Host
-from ..output import exit_code
+from ..output import envelope, exit_code
 from ..remote import LOGDIR_PROBE_CAP, facts, parse_facts
 
 SKEW_WARN_SECONDS = 5.0
@@ -26,11 +24,12 @@ def run(hosts: list[Host], jobs: int, timeout: float, as_json: bool) -> int:
             r.extra["facts"] = parse_facts(r.stdout)
             r.extra["skew"] = _skew(r)
 
+    code = exit_code(results)
     if as_json:
-        print(json.dumps([_json_item(r) for r in results], ensure_ascii=False, indent=2))
+        print(envelope("status", code, [_json_item(r) for r in results]))
     else:
         print("\n\n".join(_render(r) for r in results))
-    return exit_code(results)
+    return code
 
 
 def _skew(r: Result) -> float | None:

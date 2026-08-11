@@ -11,7 +11,6 @@ sort order.
 from __future__ import annotations
 
 import fnmatch
-import sys
 import time
 from collections import defaultdict
 from pathlib import PurePosixPath
@@ -19,7 +18,9 @@ from pathlib import PurePosixPath
 from .. import remote
 from ..conn import Conn, Limits, Result, run_many
 from ..inventory import Host
-from ..output import EXIT_BLOCKED, exit_code, human_bytes, human_time, plural
+from ..output import (
+    EXIT_BLOCKED, exit_code, fail, human_bytes, human_time, plural, to_json,
+)
 
 LIST_CAP = 20000
 
@@ -62,8 +63,7 @@ def run_ls(hosts: list[Host], spec: str, jobs: int, timeout: float, as_json: boo
     try:
         remote.check_path_spec(spec)
     except remote.PathSpecError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="ls", kind="usage")
 
     def task(conn: Conn) -> Result:
         started = time.monotonic()
@@ -74,13 +74,12 @@ def run_ls(hosts: list[Host], spec: str, jobs: int, timeout: float, as_json: boo
         )
 
     results = run_many(hosts, task, jobs=jobs)
+    code = exit_code(results)
     if as_json:
-        from ..output import to_json
-
-        print(to_json(results))
+        print(to_json(results, "ls", code=code))
     else:
         print("\n\n".join(_render_ls(r) for r in results))
-    return exit_code(results)
+    return code
 
 
 def _summarize(files: list[dict]) -> dict:
@@ -163,8 +162,7 @@ def run_find(
         since_seconds = remote.parse_since(since) if since else None
         size_floor = remote.parse_size(min_size) if min_size else None
     except (remote.PathSpecError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="find", kind="usage")
 
     def task(conn: Conn) -> Result:
         started = time.monotonic()
@@ -184,13 +182,12 @@ def run_find(
         )
 
     results = run_many(hosts, task, jobs=jobs)
+    code = exit_code(results)
     if as_json:
-        from ..output import to_json
-
-        print(to_json(results))
+        print(to_json(results, "find", code=code))
     else:
         print("\n\n".join(_render_find(r) for r in results))
-    return exit_code(results)
+    return code
 
 
 def _render_find(r: Result) -> str:

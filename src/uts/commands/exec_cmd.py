@@ -7,13 +7,12 @@ commands/sessions.py.
 
 from __future__ import annotations
 
-import sys
 import uuid
 
 from .. import guard, remote
 from ..conn import Conn, Limits, Result, run_command, run_many
 from ..inventory import Host
-from ..output import EXIT_BLOCKED, emit
+from ..output import EXIT_BLOCKED, emit, fail
 from ..session import Session, env_delta
 
 
@@ -32,22 +31,27 @@ def run(
 ) -> int:
     command = command.strip()
     if not command:
-        print("no command given. Usage: uts exec -a 'ls -la /var/log'", file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(
+            "no command given. Usage: uts exec -a 'ls -la /var/log'",
+            EXIT_BLOCKED, as_json, command="exec", kind="usage",
+        )
 
     if not write:
         # The guard reads what the user typed, never the session wrapper built around
         # it — otherwise every session command would look like it exports things.
         reason = guard.check(command)
         if reason:
-            print(guard.explain(command, reason), file=sys.stderr)
-            return EXIT_BLOCKED
+            return fail(
+                guard.explain(command, reason),
+                EXIT_BLOCKED, as_json, command="exec", kind="blocked",
+            )
 
     if pty:
         results = _run_with_pty(
             hosts, command, jobs, limits, duration, max_cols, session_name, workspace_root
         )
-        return emit(results, as_json, hint="raise --max-lines", max_cols=max_cols)
+        return emit(results, as_json, command="exec", hint="raise --max-lines",
+                    max_cols=max_cols)
 
     if session_name:
         results = _run_in_session(hosts, command, jobs, limits, session_name, workspace_root)
@@ -55,7 +59,7 @@ def run(
         results = run_command(hosts, command, limits, jobs=jobs)
 
     return emit(
-        results, as_json,
+        results, as_json, command="exec",
         hint="raise --max-lines, or narrow with grep/tail on the remote side",
         max_cols=max_cols,
     )

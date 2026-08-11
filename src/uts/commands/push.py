@@ -19,7 +19,6 @@ information is --force, which is only needed when something would be overwritten
 
 from __future__ import annotations
 
-import sys
 import tarfile
 import tempfile
 import time
@@ -29,7 +28,7 @@ from .. import remote
 from ..conn import Conn, Limits, Result, run_many
 from ..inventory import Host
 from ..output import (
-    EXIT_BLOCKED, EXIT_OK, EXIT_PARTIAL, exit_code, human_bytes, plural,
+    EXIT_BLOCKED, EXIT_OK, EXIT_PARTIAL, exit_code, fail, human_bytes, plural, to_json,
 )
 from ..workspace import Workspace
 
@@ -63,8 +62,7 @@ def run(
                 f"{human_bytes(size_cap)} limit. Raise --max-size, or send less."
             )
     except (PushError, remote.PathSpecError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="push", kind="usage")
 
     ws = Workspace(workspace_root)
     members = [member for _, member, _ in files]
@@ -83,10 +81,13 @@ def run(
         if archive is not None:
             archive.unlink(missing_ok=True)
 
-    if as_json:
-        from ..output import to_json
+    # Settled before it is reported: the envelope carries the code the caller sees,
+    # and a dry run downgrades partial reachability to OK.
+    code = exit_code(results)
+    code = EXIT_OK if code == EXIT_PARTIAL and dry_run else code
 
-        print(to_json(results))
+    if as_json:
+        print(to_json(results, "push", code=code))
     else:
         print("\n\n".join(_render(r, dry_run) for r in results))
 
@@ -95,8 +96,7 @@ def run(
         if not as_json:
             print(f"\nworkspace index updated: {index}")
 
-    code = exit_code(results)
-    return EXIT_OK if code == EXIT_PARTIAL and dry_run else code
+    return code
 
 
 def _collect(srcs: list[str]) -> list[tuple[Path, str, int]]:

@@ -10,7 +10,7 @@ from .conn import DEFAULT_EXEC_TIMEOUT, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Li
 from .inventory import InventoryError, load_inventory, select
 from .commands.pull import DEFAULT_MAX_SIZE as PULL_DEFAULT_MAX_SIZE
 from .commands.push import DEFAULT_MAX_SIZE as PUSH_DEFAULT_MAX_SIZE
-from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED, EXIT_BLOCKED
+from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED, EXIT_BLOCKED, EXIT_OK, envelope, fail
 
 EPILOG = """\
 choosing hosts -- everything that touches the network takes one of these:
@@ -45,14 +45,43 @@ shell, not this one.
 """
 
 
-def _targeting() -> argparse.ArgumentParser:
+# What main() is parsing. argparse reports a usage error from whichever parser found
+# it, before --json has been read off the namespace, and main(argv) is called directly
+# by the tests as well as by the console script -- so the argv under consideration has
+# to be reachable from there.
+_ARGV: list[str] = []
+
+
+class _Parser(argparse.ArgumentParser):
+    """An argparse usage error is a refusal like any other, and says so the same way.
+
+    Two things needed fixing. argparse exits 2, which is EXIT_PARTIAL in this tool's
+    table -- an agent could not tell "some hosts were unreachable" from "you typed it
+    wrong". And it writes usage text to stderr, which under --json left stdout empty,
+    the one thing the envelope exists to prevent. Nothing was sent, so it is
+    EXIT_BLOCKED with kind "usage", exactly like the other pre-flight refusals.
+    """
+
+    def error(self, message: str):
+        argv = _ARGV if _ARGV else sys.argv[1:]
+        # self.prog is "uts" on the top-level parser and "uts ls" on a subparser; when
+        # the subcommand is not known yet, saying so beats inventing one.
+        parts = self.prog.split()
+        sys.exit(fail(
+            f"{self.format_usage().rstrip()}\n{self.prog}: error: {message}",
+            EXIT_BLOCKED, "--json" in argv,
+            command=parts[1] if len(parts) > 1 else None, kind="usage",
+        ))
+
+
+def _targeting() -> _Parser:
     """`-H` / `-a`, shared by every subcommand that opens a connection.
 
     Carried on a parent parser rather than a positional: a path and a host name are
     both bare words, and `uts ls data` should never have to be guessed at. Neither
     flag is an error -- see inventory.select.
     """
-    p = argparse.ArgumentParser(add_help=False)
+    p = _Parser(add_help=False)
     g = p.add_argument_group("hosts")
     g.add_argument(
         "-H", "--host", action="append", metavar="NAME",
@@ -62,54 +91,91 @@ def _targeting() -> argparse.ArgumentParser:
     return p
 
 
+def _add_globals(p: argparse.ArgumentParser, *, suppress: bool = False) -> None:
+    """The options that mean the same thing for every subcommand.
+
+    Added twice: once to the top-level parser, once to a parent every subcommand
+    inherits, so `uts --json status -a` and `uts status -a --json` both work. Nobody
+    remembers which side of the verb a global belongs on, and `--json` erroring out
+    in the position people actually type it is a poor contract for a program to read.
+
+    The second copy defaults to SUPPRESS: without it argparse would write the
+    subparser's own default over whatever the top-level parse already stored, and
+    `uts --json status` would silently come back as text.
+    """
+    def d(value):
+        return argparse.SUPPRESS if suppress else value
+
+    p.add_argument(
+        "--inventory", metavar="PATH", default=d(None),
+        help="host inventory file, default ./hosts.json",
+    )
+    p.add_argument(
+        "--jobs", "-j", type=int, default=d(8), metavar="N",
+        help="concurrency, default 8",
+    )
+    p.add_argument(
+        "--timeout", type=float, default=d(DEFAULT_EXEC_TIMEOUT), metavar="S",
+        help=f"per-command timeout in seconds, default {DEFAULT_EXEC_TIMEOUT:g}",
+    )
+    p.add_argument(
+        "--max-lines", type=int, default=d(DEFAULT_MAX_LINES), metavar="N",
+        help=f"max lines shown per host, default {DEFAULT_MAX_LINES}",
+    )
+    p.add_argument(
+        "--max-bytes", type=int, default=d(DEFAULT_MAX_BYTES), metavar="N",
+        help=f"max bytes shown per host, default {DEFAULT_MAX_BYTES}",
+    )
+    p.add_argument(
+        "--max-cols", type=int, default=d(DEFAULT_MAX_COLS), metavar="N",
+        help=f"max chars per line, 0 disables, default {DEFAULT_MAX_COLS}",
+    )
+    p.add_argument(
+        "--json", action="store_true", default=d(False),
+        help="emit one JSON envelope on stdout, on every exit path",
+    )
+    p.add_argument(
+        "--workspace", metavar="DIR", default=d(None),
+        help="local workspace, default ./.uts",
+    )
+
+
+def _globals() -> _Parser:
+    p = _Parser(add_help=False)
+    _add_globals(p, suppress=True)
+    return p
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    # _Parser, so a usage error goes out through the same contract as every other
+    # refusal. add_subparsers hands the class down to the subparsers too.
+    p = _Parser(
         prog="uts",
         description="Inspect and analyse logs and data on other machines over SSH",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument(
-        "--inventory", metavar="PATH", help="host inventory file, default ./hosts.json"
-    )
-    p.add_argument("--jobs", "-j", type=int, default=8, metavar="N", help="concurrency, default 8")
-    p.add_argument(
-        "--timeout", type=float, default=DEFAULT_EXEC_TIMEOUT, metavar="S",
-        help=f"per-command timeout in seconds, default {DEFAULT_EXEC_TIMEOUT:g}",
-    )
-    p.add_argument(
-        "--max-lines", type=int, default=DEFAULT_MAX_LINES, metavar="N",
-        help=f"max lines shown per host, default {DEFAULT_MAX_LINES}",
-    )
-    p.add_argument(
-        "--max-bytes", type=int, default=DEFAULT_MAX_BYTES, metavar="N",
-        help=f"max bytes shown per host, default {DEFAULT_MAX_BYTES}",
-    )
-    p.add_argument(
-        "--max-cols", type=int, default=DEFAULT_MAX_COLS, metavar="N",
-        help=f"max chars per line, 0 disables, default {DEFAULT_MAX_COLS}",
-    )
-    p.add_argument("--json", action="store_true", help="emit JSON")
-    p.add_argument("--workspace", metavar="DIR", help="local workspace, default ./.uts")
+    _add_globals(p)
 
+    glob = _globals()
     target = _targeting()
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("hosts", help="list the inventory (no network)")
+    sub.add_parser("hosts", parents=[glob], help="list the inventory (no network)")
 
     sub.add_parser(
-        "status", parents=[target],
+        "status", parents=[target, glob],
         help="reachability, machine profile, clock skew",
     )
 
     sp_ls = sub.add_parser(
-        "ls", parents=[target],
+        "ls", parents=[target, glob],
         help="summarise a directory or glob: count, size, types, age",
     )
     sp_ls.add_argument("path", help="directory or glob -- wrap it in single quotes")
 
     sp_find = sub.add_parser(
-        "find", parents=[target], help="filter files by name/time/size and list them"
+        "find", parents=[target, glob], help="filter files by name/time/size and list them"
     )
     sp_find.add_argument("path")
     sp_find.add_argument("--name", metavar="GLOB", help="filename filter, e.g. '*.log'")
@@ -121,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sp_peek = sub.add_parser(
-        "peek", parents=[target],
+        "peek", parents=[target, glob],
         help="inspect structure without fetching: line/column/delimiter profile + a sample",
         description="Profiles a batch of files by default -- only side-by-side comparison "
                     "reveals that several runs are mixed together.",
@@ -131,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_peek.add_argument("--max-files", type=int, default=500, help="files to probe, default 500")
 
     sp_pull = sub.add_parser(
-        "pull", parents=[target],
+        "pull", parents=[target, glob],
         help="fetch remote files into .uts/ (single remote tar+gzip stream)",
         description="Narrow with ls/peek first. Local paths mirror remote ones and every "
                     "fetch is recorded in the manifest.",
@@ -153,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_pull.add_argument("--dry-run", action="store_true", help="report what would be fetched")
 
     sp_push = sub.add_parser(
-        "push", parents=[target],
+        "push", parents=[target, glob],
         help="copy local files to the selected hosts (single tar+gzip stream)",
         description="The mirror of pull: local sources, then --to for the remote "
                     "destination directory (uts push -H a ./setup.sh ./lib --to '~/bin/'). "
@@ -177,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sp_exec = sub.add_parser(
-        "exec", parents=[target],
+        "exec", parents=[target, glob],
         help="run one command on the selected hosts",
         description="Run one command concurrently. The command is one quoted string, handed "
                     "to the remote shell as-is -- so pipes, redirection and globs work the way "
@@ -209,14 +275,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser(
-        "shell", parents=[target],
+        "shell", parents=[target, glob],
         help="open an interactive terminal on one host (for a person, not an agent)",
         description="Needs a real terminal and exactly one host. For scripted use, "
                     "uts exec --pty gives the same terminal without the interaction.",
     )
 
     sp_start = sub.add_parser(
-        "start", parents=[target],
+        "start", parents=[target, glob],
         help="run a command in the background, under a name you choose",
         description="One quoted string, same as uts exec. The command outlives this call "
                     "and the connection that made it. "
@@ -242,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sp_ps = sub.add_parser(
-        "ps", parents=[target],
+        "ps", parents=[target, glob],
         help="what each session is doing: running / exited / idle, and where",
         description="One table for both halves of a session: the background job on "
                     "the remote side, and the cwd and exports recorded for it here. "
@@ -250,12 +316,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_ps.add_argument("-s", "--session", metavar="NAME", help="only this session")
 
-    sp_logs = sub.add_parser("logs", parents=[target], help="show a session's output")
+    sp_logs = sub.add_parser("logs", parents=[target, glob], help="show a session's output")
     sp_logs.add_argument("-s", "--session", metavar="NAME", required=True)
     sp_logs.add_argument("--tail", type=int, default=50, help="last N lines, default 50")
 
     sp_stop = sub.add_parser(
-        "stop", parents=[target], help="stop a running session, and optionally forget it",
+        "stop", parents=[target, glob], help="stop a running session, and optionally forget it",
         description="-s NAME is one session, its absence is every session on the "
                     "selected hosts, and --clean is how far to go: stopping keeps the "
                     "log, because how a run ended is usually why you stopped it, so a "
@@ -275,7 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
              "gave, including sessions that are merely idle",
     )
 
-    sub.add_parser("index", help="rebuild .uts/INDEX.md and print a workspace summary")
+    sub.add_parser("index", parents=[glob], help="rebuild .uts/INDEX.md and print a workspace summary")
 
     return p
 
@@ -285,7 +351,7 @@ def quote_for_display(command: str) -> str:
     return f'"{command}"' if "'" in command else f"'{command}'"
 
 
-def one_command(parts: list[str], subcommand: str) -> str | None:
+def one_command(parts: list[str], subcommand: str, as_json: bool = False) -> str | None:
     """The command `exec` and `start` send is exactly one string, or it is an error.
 
     One form, not two. The v2 `--` form rejoined argv with shlex.join so the remote
@@ -306,17 +372,19 @@ def one_command(parts: list[str], subcommand: str) -> str | None:
         return parts[0]
 
     rewritten = quote_for_display(shlex.join(parts))
-    print(
+    fail(
         f"uts {subcommand} takes the command as one quoted string, not as separate "
         f"arguments.\n"
         f"      try:  uts {subcommand} ... {rewritten}",
-        file=sys.stderr,
+        EXIT_BLOCKED, as_json, command=subcommand, kind="usage",
     )
     return None
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    global _ARGV
+    _ARGV = sys.argv[1:] if argv is None else list(argv)
+    args = build_parser().parse_args(_ARGV)
 
     try:
         inventory = load_inventory(args.inventory)
@@ -327,8 +395,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             selected = select(inventory, args.host, args.all)
     except InventoryError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_ALL_FAILED
+        return fail(str(exc), EXIT_ALL_FAILED, args.json,
+                    command=args.command, kind="inventory")
 
     from .commands import browse, exec_cmd, hosts as hosts_cmd, peek as peek_cmd
     from .commands import pull as pull_cmd, push as push_cmd
@@ -338,15 +406,22 @@ def main(argv: list[str] | None = None) -> int:
         from .workspace import Workspace, plural
 
         ws = Workspace(args.workspace)
-        print(f"workspace index rebuilt: {ws.write_index()}")
+        index = ws.write_index()
         entries = ws.latest_per_file()
         hosts_seen = len({host for host, _, _ in entries})
         pushed = sum(1 for _, direction, _ in entries if direction == "push")
-        summary = f"{plural(len(entries) - pushed, 'file')} pulled"
+        pulled = len(entries) - pushed
+        if args.json:
+            # No hosts: this one only ever reads what is already on this machine.
+            print(envelope("index", EXIT_OK, [], index=str(index),
+                           pulled=pulled, pushed=pushed, hosts_seen=hosts_seen))
+            return EXIT_OK
+        print(f"workspace index rebuilt: {index}")
+        summary = f"{plural(pulled, 'file')} pulled"
         if pushed:
             summary += f", {plural(pushed, 'file')} pushed"
         print(f"{summary} across {plural(hosts_seen, 'host')}")
-        return 0
+        return EXIT_OK
 
     if args.command == "hosts":
         return hosts_cmd.run(selected, args.json)
@@ -355,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         return status_cmd.run(selected, args.jobs, args.timeout, args.json)
 
     if args.command == "exec":
-        command = one_command(args.command_, "exec")
+        command = one_command(args.command_, "exec", args.json)
         if command is None:
             return EXIT_BLOCKED
         limits = Limits(
@@ -381,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
         return shell_cmd.run(selected)
 
     if args.command == "start":
-        command = one_command(args.command_, "start")
+        command = one_command(args.command_, "start", args.json)
         if command is None:
             return EXIT_BLOCKED
         limits = Limits(

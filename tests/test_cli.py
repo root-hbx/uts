@@ -7,9 +7,12 @@ afterwards. These tests pin the boundary that replaces it: flags belong to uts,
 the string belongs to the far side.
 """
 
+import json
+
 import pytest
 
-from uts.cli import build_parser, one_command, quote_for_display
+from uts.cli import build_parser, main, one_command, quote_for_display
+from uts.output import EXIT_BLOCKED
 
 
 def parse_exec(args):
@@ -149,3 +152,52 @@ def test_every_networked_subcommand_takes_the_same_target_flags(command, extra):
 def test_local_only_subcommands_have_no_target_flags(command, capsys):
     with pytest.raises(SystemExit):
         build_parser().parse_args([command, "-a"])
+
+
+# ------------------------------------------------------------------ global flags
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--json", "status", "-a"],   # before the verb
+        ["status", "-a", "--json"],   # after it, which is how people type it
+    ],
+)
+def test_globals_are_accepted_on_either_side_of_the_verb(argv):
+    assert build_parser().parse_args(argv).json is True
+
+
+def test_the_subcommand_default_does_not_overwrite_a_global_given_first():
+    # The argparse trap this guards: a parent parser's own default, applied second,
+    # silently turns `uts --json status` back into text output.
+    ns = build_parser().parse_args(["--json", "exec", "-H", "t", "ls"])
+    assert ns.json is True
+    assert build_parser().parse_args(["--timeout", "5", "ls", "-H", "t", "/x"]).timeout == 5.0
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["ls", "-H", "t"], ["--nope"], ["exec", "-H", "t", "--duration", "abc"]],
+)
+def test_a_usage_error_is_blocked_not_partial(argv):
+    # argparse exits 2, which this tool already spends on EXIT_PARTIAL — "some hosts
+    # were unreachable" must not share a code with "you typed it wrong".
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == EXIT_BLOCKED
+
+
+def test_a_usage_error_still_answers_in_json(capsys):
+    with pytest.raises(SystemExit):
+        main(["ls", "-H", "t", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "ls"
+    assert payload["error"]["kind"] == "usage"
+    assert "required: path" in payload["error"]["message"]
+
+
+def test_a_usage_error_before_the_verb_names_no_command(capsys):
+    with pytest.raises(SystemExit):
+        main(["--json"])
+    assert json.loads(capsys.readouterr().out)["command"] is None

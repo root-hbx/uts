@@ -19,13 +19,10 @@ the job itself — and the cwd/env side is `.uts/sessions/<name>.json` here.
 
 from __future__ import annotations
 
-import json
-import sys
-
 from .. import guard, remote
 from ..conn import Conn, Limits, Result, run_many
 from ..inventory import Host
-from ..output import EXIT_BLOCKED, emit, exit_code, plural, to_json
+from ..output import EXIT_BLOCKED, emit, envelope, exit_code, fail, plural, to_json
 from ..session import Session, list_sessions
 
 LIST_LIMITS = Limits(max_lines=2000, max_bytes=1 << 20)
@@ -47,23 +44,23 @@ def run_start(
 ) -> int:
     command = command.strip()
     if not command:
-        print(
+        return fail(
             "no command given. Usage: uts start -H <name> -s <session> 'python train.py'",
-            file=sys.stderr,
+            EXIT_BLOCKED, as_json, command="start", kind="usage",
         )
-        return EXIT_BLOCKED
 
     try:
         remote.check_session_name(name)
     except remote.PathSpecError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="start", kind="usage")
 
     if not write:
         reason = guard.check(command)
         if reason:
-            print(guard.explain(command, reason), file=sys.stderr)
-            return EXIT_BLOCKED
+            return fail(
+                guard.explain(command, reason),
+                EXIT_BLOCKED, as_json, command="start", kind="blocked",
+            )
 
     # The session's cwd and exports are replayed into the job, but the job does not
     # report state back: it outlives this call, so there is no "where did it end up"
@@ -96,11 +93,12 @@ def run_start(
         return result
 
     results = run_many(hosts, task, jobs=jobs)
+    code = exit_code(results)
     if as_json:
-        print(to_json(results))
+        print(to_json(results, "start", code=code))
     else:
         print("\n\n".join(render_started(r) for r in results))
-    return exit_code(results)
+    return code
 
 
 def render_started(r: Result) -> str:
@@ -140,8 +138,7 @@ def run_ps(
         try:
             remote.check_session_name(name)
         except remote.PathSpecError as exc:
-            print(str(exc), file=sys.stderr)
-            return EXIT_BLOCKED
+            return fail(str(exc), EXIT_BLOCKED, as_json, command="ps", kind="usage")
 
     limits = Limits(max_lines=LIST_LIMITS.max_lines, max_bytes=LIST_LIMITS.max_bytes,
                     timeout=timeout)
@@ -165,11 +162,12 @@ def run_ps(
         )
         r.extra["cwds"] = {s: local[s][r.host.name] for s in local if r.host.name in local[s]}
 
+    code = exit_code(results)
     if as_json:
-        print(json.dumps([_json_item(r) for r in results], ensure_ascii=False, indent=2))
+        print(envelope("ps", code, [_json_item(r) for r in results]))
     else:
         print(_render_table(results))
-    return exit_code(results)
+    return code
 
 
 def _local_state(workspace_root: str | None) -> dict[str, dict[str, str]]:
@@ -190,12 +188,11 @@ def run_logs(
     try:
         command = remote.job_log(name, tail)
     except remote.PathSpecError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="logs", kind="usage")
 
     results = run_many(hosts, lambda c: c.run(command, limits), jobs=jobs)
     return emit(
-        results, as_json,
+        results, as_json, command="logs",
         hint=f"raise --tail, e.g. uts logs -s {name} --tail 500",
         max_cols=max_cols,
     )
@@ -223,8 +220,7 @@ def run_stop(
     try:
         command = remote.kill_job(name, force)
     except remote.PathSpecError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="stop", kind="usage")
 
     limits = Limits(max_lines=200, max_bytes=64 << 10, timeout=timeout)
 
@@ -235,7 +231,7 @@ def run_stop(
         return result
 
     results = run_many(hosts, task, jobs=jobs)
-    return emit(results, as_json, hint="", max_cols=0)
+    return emit(results, as_json, command="stop", hint="", max_cols=0)
 
 
 def _clean(
@@ -257,8 +253,7 @@ def _clean(
     try:
         command = remote.stop_and_clean(name, force)
     except remote.PathSpecError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="stop", kind="usage")
     results = run_many(hosts, lambda c: c.run(command, limits), jobs=jobs)
 
     local = _local_state(workspace_root)
@@ -277,8 +272,9 @@ def _clean(
         r.extra["busy"] = busy
         r.stdout = ""
 
+    code = exit_code(results)
     if as_json:
-        print(json.dumps([_json_item(r) for r in results], ensure_ascii=False, indent=2))
+        print(envelope("stop", code, [_json_item(r) for r in results]))
     else:
         for r in results:
             if not r.reachable:
@@ -291,7 +287,7 @@ def _clean(
             if r.extra["busy"]:
                 line += f"; still running: {', '.join(r.extra['busy'])}"
             print(line)
-    return exit_code(results)
+    return code
 
 
 # ------------------------------------------------------------------ rendering

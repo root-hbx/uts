@@ -16,7 +16,6 @@ other. The manifest stays in `.uts/` regardless — see workspace.Workspace.
 
 from __future__ import annotations
 
-import sys
 import tarfile
 import tempfile
 import time
@@ -26,7 +25,8 @@ from .. import remote
 from ..conn import Conn, Limits, Result, run_many
 from ..inventory import Host
 from ..output import (
-    EXIT_BLOCKED, EXIT_OK, EXIT_PARTIAL, exit_code, human_bytes, human_time, plural,
+    EXIT_BLOCKED, EXIT_OK, EXIT_PARTIAL, exit_code, fail, human_bytes, human_time,
+    plural, to_json,
 )
 from ..workspace import Workspace
 
@@ -53,8 +53,7 @@ def run(
         size_cap = remote.parse_size(max_size)
         cutoff = time.time() - remote.parse_since(since) if since else None
     except (remote.PathSpecError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="pull", kind="usage")
 
     ws = Workspace(workspace_root, data_root=to)
 
@@ -63,10 +62,14 @@ def run(
 
     results = run_many(hosts, task, jobs=jobs)
 
-    if as_json:
-        from ..output import to_json
+    # A dry run that could not reach every host still answered the question it was
+    # asked, so the code is settled before it is reported — the envelope has to carry
+    # the code the caller will actually see.
+    code = exit_code(results)
+    code = EXIT_OK if code == EXIT_PARTIAL and dry_run else code
 
-        print(to_json(results))
+    if as_json:
+        print(to_json(results, "pull", code=code))
     else:
         print("\n\n".join(_render(r, dry_run) for r in results))
 
@@ -75,8 +78,7 @@ def run(
         if not as_json:
             print(f"\nworkspace index updated: {index}")
 
-    code = exit_code(results)
-    return EXIT_OK if code == EXIT_PARTIAL and dry_run else code
+    return code
 
 
 def _pull_one(

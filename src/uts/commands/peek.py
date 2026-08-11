@@ -9,7 +9,6 @@ surface that, and downstream time-series loading fails silently on it.
 
 from __future__ import annotations
 
-import sys
 import time
 from collections import defaultdict
 from pathlib import PurePosixPath
@@ -18,7 +17,7 @@ from .. import remote
 from ..conn import Conn, Limits, Result, run_many
 from ..inventory import Host
 from ..output import (
-    EXIT_BLOCKED, exit_code, fold_wide_lines, human_bytes, plural,
+    EXIT_BLOCKED, exit_code, fail, fold_wide_lines, human_bytes, plural, to_json,
 )
 
 LIST_CAP = 5000
@@ -41,8 +40,7 @@ def run(
     try:
         remote.check_path_spec(spec)
     except remote.PathSpecError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_BLOCKED
+        return fail(str(exc), EXIT_BLOCKED, as_json, command="peek", kind="usage")
 
     results = run_many(
         hosts,
@@ -50,13 +48,12 @@ def run(
         jobs=jobs,
     )
 
+    code = exit_code(results)
     if as_json:
-        from ..output import to_json
-
-        print(to_json(results))
+        print(to_json(results, "peek", code=code))
     else:
         print("\n\n".join(_render(r, max_cols) for r in results))
-    return exit_code(results)
+    return code
 
 
 def _peek_one(

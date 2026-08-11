@@ -3,13 +3,17 @@ import json
 from uts.conn import DEFAULT_MAX_BYTES, Result, _Capped
 from uts.inventory import Host
 from uts.output import (
+    CONTRACT,
     EXIT_ALL_FAILED,
     EXIT_BLOCKED,
     EXIT_OK,
     EXIT_PARTIAL,
     EXIT_REMOTE_NONZERO,
+    envelope,
     exit_code,
+    fail,
     fold_wide_lines,
+    host_items,
     render,
     to_json,
     truncation_note,
@@ -102,7 +106,7 @@ def test_render_labels_stderr():
 
 
 def test_json_round_trips():
-    payload = json.loads(to_json([ok(stdout="hi\n"), dead()]))
+    payload = json.loads(to_json([ok(stdout="hi\n"), dead()], "exec"))["hosts"]
     assert [p["host"] for p in payload] == ["a", "b"]
     assert payload[0]["reachable"] is True
     assert payload[1]["reachable"] is False and payload[1]["error"] == "cannot connect"
@@ -163,6 +167,71 @@ def test_partial_refusal_reports_partial():
 
 
 def test_refusal_shows_up_in_json():
-    payload = json.loads(to_json([refused(why="too big")]))
+    payload = json.loads(to_json([refused(why="too big")], "pull"))["hosts"]
     assert payload[0]["refused"] == "too big"
     assert payload[0]["reachable"] is True
+
+
+# ------------------------------------------------------------------- the envelope
+
+
+def test_every_json_answer_carries_the_same_four_keys():
+    payload = json.loads(to_json([ok()], "exec"))
+    assert payload["uts"] == CONTRACT
+    assert payload["command"] == "exec"
+    assert payload["ok"] is True
+    assert payload["exit"] == EXIT_OK
+
+
+def test_ok_tracks_the_exit_code_not_reachability():
+    # A host answered and the remote command failed: uts worked, the request did not.
+    payload = json.loads(to_json([ok(rc=1)], "exec"))
+    assert payload["ok"] is False and payload["exit"] == EXIT_REMOTE_NONZERO
+
+
+def test_the_envelope_reports_the_code_it_was_given():
+    # pull/push downgrade partial to OK under --dry-run, and the envelope has to say
+    # what the caller will actually see rather than recomputing it.
+    payload = json.loads(to_json([ok(), dead()], "pull", code=EXIT_OK))
+    assert payload["exit"] == EXIT_OK and payload["ok"] is True
+
+
+def test_hosts_are_unchanged_by_the_wrapping():
+    results = [ok(stdout="hi\n"), dead()]
+    assert json.loads(to_json(results, "exec"))["hosts"] == host_items(results)
+
+
+# ----------------------------------------------------------------- error envelope
+
+
+def test_a_blocked_request_is_still_json_on_stdout(capsys):
+    # The whole point: exit 4 used to mean empty stdout and prose on stderr, which
+    # left a program with nothing to read.
+    code = fail("rm is destructive", EXIT_BLOCKED, True, command="exec", kind="blocked")
+    out = capsys.readouterr()
+    assert code == EXIT_BLOCKED
+    assert out.err == ""
+    payload = json.loads(out.out)
+    assert payload["ok"] is False and payload["exit"] == EXIT_BLOCKED
+    assert payload["error"] == {"kind": "blocked", "message": "rm is destructive"}
+    assert payload["hosts"] == []
+
+
+def test_text_mode_failures_still_read_like_prose_on_stderr(capsys):
+    code = fail("no such host", EXIT_ALL_FAILED, False, command="status", kind="inventory")
+    out = capsys.readouterr()
+    assert code == EXIT_ALL_FAILED
+    assert out.out == ""
+    assert out.err.strip() == "no such host"
+
+
+def test_error_and_success_envelopes_share_their_shape():
+    good = set(json.loads(to_json([ok()], "exec")))
+    bad = set(json.loads(envelope("exec", EXIT_BLOCKED, [], error={"kind": "usage",
+                                                                  "message": "x"})))
+    assert good < bad and bad - good == {"error"}
+
+
+def test_extra_fields_ride_alongside_the_hosts_list():
+    payload = json.loads(envelope("index", EXIT_OK, [], pulled=3, pushed=1))
+    assert payload["pulled"] == 3 and payload["pushed"] == 1 and payload["hosts"] == []

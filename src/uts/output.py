@@ -19,6 +19,16 @@ EXIT_PARTIAL = 2  # some hosts unreachable or refused
 EXIT_ALL_FAILED = 3  # every host unreachable, or the inventory itself is broken
 EXIT_BLOCKED = 4  # guard / usage error / size cap — nothing was sent
 
+# Bumped only when the envelope below changes shape. An agent that reads this can
+# tell "uts is older than I expect" from "the command failed".
+CONTRACT = 1
+
+# Why a request never reached the network. Each one points at a different fix:
+#   usage      — the invocation is malformed; correct the arguments
+#   blocked    — guard refused a destructive command; pass --write if it was meant
+#   inventory  — host selection or hosts.json is wrong; check `uts hosts`
+ERROR_KINDS = ("usage", "blocked", "inventory")
+
 DEFAULT_HINT = "raise --max-lines, or narrow the query on the remote side"
 
 # Line caps do nothing for *wide* lines: a 104-column delay matrix packs 4KB of
@@ -115,7 +125,13 @@ def render(
     return "\n\n".join(blocks)
 
 
-def to_json(results: list[Result]) -> str:
+def host_items(results: list[Result]) -> list[dict]:
+    """One object per host: the Result fields, with `extra` flattened on top.
+
+    `extra` is splatted rather than nested because it is where each subcommand puts
+    its own answer — `ls` its summary, `ps` its jobs — and one flat object per host
+    reads the same way whichever subcommand produced it.
+    """
     payload = []
     for r in results:
         item = {
@@ -137,7 +153,55 @@ def to_json(results: list[Result]) -> str:
         if r.extra:
             item.update(r.extra)
         payload.append(item)
+    return payload
+
+
+def envelope(
+    command: str | None,
+    code: int,
+    hosts: list[dict],
+    *,
+    error: dict | None = None,
+    **fields,
+) -> str:
+    """The one shape every `--json` invocation returns, success or failure.
+
+    Success used to be a bare array and failure was prose on stderr, which left a
+    caller with "exit 4 and empty stdout" and nothing to read. One envelope means a
+    consumer parses the same keys either way and finds out *why* from `error.kind`.
+    """
+    payload = {
+        "uts": CONTRACT,
+        "command": command,
+        "ok": code == EXIT_OK,
+        "exit": code,
+    }
+    if error is not None:
+        payload["error"] = error
+    payload.update(fields)
+    payload["hosts"] = hosts
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def to_json(results: list[Result], command: str, *, code: int | None = None) -> str:
+    return envelope(command, exit_code(results) if code is None else code,
+                    host_items(results))
+
+
+def fail(
+    message: str, code: int, as_json: bool, *, command: str | None, kind: str
+) -> int:
+    """The only way out of a request that never reached the network.
+
+    Every such path used to `print(..., file=sys.stderr)` and return a code, so under
+    --json the caller got valid-looking silence. Routing them all through here is what
+    makes the contract "there is always JSON on stdout" rather than "usually".
+    """
+    if as_json:
+        print(envelope(command, code, [], error={"kind": kind, "message": message}))
+    else:
+        print(message, file=sys.stderr)
+    return code
 
 
 def exit_code(results: list[Result]) -> int:
@@ -161,13 +225,16 @@ def exit_code(results: list[Result]) -> int:
 def emit(
     results: list[Result],
     as_json: bool,
+    *,
+    command: str,
     hint: str = DEFAULT_HINT,
     max_cols: int = DEFAULT_MAX_COLS,
 ) -> int:
+    code = exit_code(results)
     # No column folding under --json: that output feeds programs, and the byte cap
     # already bounds its size.
-    print(to_json(results) if as_json else render(results, hint, max_cols))
-    code = exit_code(results)
+    print(to_json(results, command, code=code) if as_json
+          else render(results, hint, max_cols))
     if code in (EXIT_PARTIAL, EXIT_ALL_FAILED) and not as_json:
         bad = [r.host.name for r in results if not r.reachable]
         print(f"\n{len(bad)}/{len(results)} unreachable: {', '.join(bad)}", file=sys.stderr)
