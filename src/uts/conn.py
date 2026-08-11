@@ -7,6 +7,10 @@ Two things here are load-bearing:
    server's MaxAuthTries before the password is ever offered.
 2. Output caps apply *while reading*. Capping after the fact means `cat 2GB.log`
    lands 2GB in local memory first. Past the hard limit the channel is closed.
+
+Every exec_command() here goes through remote.posix_wrap(): sshd would otherwise
+hand the command to the account's login shell, and a fish host cannot parse the
+POSIX snippets in remote.py. See that function for why it sits at this boundary.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import paramiko
 from paramiko.ssh_exception import NoValidConnectionsError
 
 from .inventory import Host
+from .remote import posix_wrap
 
 DEFAULT_MAX_LINES = 200
 DEFAULT_MAX_BYTES = 64 * 1024
@@ -163,7 +168,7 @@ class Conn:
         chan = transport.open_session()
         chan.settimeout(limits.timeout)
         try:
-            chan.exec_command(command)
+            chan.exec_command(posix_wrap(command))
             out, err, aborted = _drain(chan, limits)
             rc = chan.recv_exit_status() if not aborted else -1
         finally:
@@ -205,7 +210,7 @@ class Conn:
         deadline = time.monotonic() + timeout
         idle_after_exit = 0
         try:
-            chan.exec_command(command)
+            chan.exec_command(posix_wrap(command))
             while True:
                 ready, _, _ = select.select([chan], [], [], 0.2)
                 got = False
@@ -280,7 +285,7 @@ class Conn:
         raw = bytearray()
         try:
             chan.get_pty(term="xterm-256color", width=cols, height=rows)
-            chan.exec_command(command)
+            chan.exec_command(posix_wrap(command))
             if duration is None:
                 out, err, aborted = _drain(chan, limits)
                 rc = chan.recv_exit_status() if not aborted else -1
@@ -329,7 +334,7 @@ class Conn:
         sent = 0
         deadline = time.monotonic() + timeout
         try:
-            chan.exec_command(command)
+            chan.exec_command(posix_wrap(command))
             while True:
                 chunk = source.read(65536)
                 if not chunk:

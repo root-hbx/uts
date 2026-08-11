@@ -33,6 +33,15 @@ quotes are load-bearing. Inner quoting is yours to write: `"pgrep -af 'sleep 600
 Several arguments is an error that prints the correctly-quoted rewrite rather than
 guessing at what you meant.
 
+**The dialect is POSIX `sh`, on every host**, whatever shell the account logs into —
+uts pins it so a bash box, a zsh box and a fish box all behave the same. Write POSIX:
+`VAR=$(...)`, `[ ... ]`, `. script`. For bash-only syntax ask for it explicitly, which
+works the same everywhere:
+
+```bash
+uts exec -a 'bash -c "for i in {1..5}; do echo $i; done"'   # {1..5}, [[ ]], <<<
+```
+
 **3. A session name is the whole handle.** `-s NAME` names *both* a cwd/env context
 *and* the one background job running in it. Sessions are opt-in — without `-s`, every
 command starts from a clean login, because a command whose meaning depends on
@@ -113,8 +122,11 @@ produced — `ls` a `summary`, `find` a `files` list, `peek` `shapes`, `ps` `job
 
 ## What will bite you
 
-- **The remote login shell may be zsh, and zsh aborts a command outright when a glob
-  matches nothing.** Guard with `2>/dev/null || true`, or use `find`.
+- **A glob that matches nothing does not vanish** — POSIX sh passes the pattern
+  through literally, so `ls ~/logs/*.gz` on a host with no matches "finds" a file
+  named `*.gz`. Guard with `2>/dev/null || true`, or use `find`.
+- **Bash-only syntax fails**, because the dialect is POSIX `sh` everywhere: `{1..5}`,
+  `[[ ]]`, `<<<` and arrays need an explicit `bash -c '...'` around them.
 - **`pkill -f PATTERN` can kill the SSH session running it** — that session's own
   command line contains the pattern. Use `uts stop` for uts-started work.
 - **Output is capped while being read**, not after. Always check `truncated` /

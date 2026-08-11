@@ -72,6 +72,9 @@ def _render(r: Result) -> str:
     row("host", f.get("hostname"))
     row("os", f.get("os"))
     row("kernel", f.get("kernel"))
+    # Worth a line of its own: uts pins remote commands to POSIX sh regardless, so
+    # when a host behaves oddly this says which shell the account actually logs into.
+    row("shell", f.get("shell"))
     hw = " · ".join(
         p for p in (f.get("arch"), _suffix(f.get("cpus"), " cpu"), _prefix(f.get("mem"), "mem ")) if p
     )

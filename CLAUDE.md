@@ -85,18 +85,31 @@ without a network.
   output loses the trailer, and that case must stay loud.
 - **PTY merges stderr into stdout**, and `_head_tags` says so in the block header;
   without it an empty stderr reads as "nothing went wrong".
+- **Every command runs under `sh -c`** (`remote.posix_wrap`, applied at the four
+  `chan.exec_command()` sites in `conn.py`). sshd hands an exec request to the
+  *account's login shell*; bash and zsh are near enough to POSIX that the snippets
+  mostly worked, but fish is not a POSIX shell and rejects `n=$(...)` outright,
+  which reduced `uts status` on a fish host to `clock ?` plus a stderr blurt. The
+  wrap sits at that boundary rather than at the end of each builder in `remote.py`
+  so that it covers the command the *user* typed too — one dialect on every host is
+  the point. It does not lose the login shell's environment: that shell still runs
+  and `sh` inherits from it. **`uts shell` is the deliberate exception** — it uses
+  `invoke_shell()`, and an interactive terminal should stay the user's own fish.
+  The cost is that bash-only syntax no longer works implicitly; `bash -c '...'` is
+  the escape hatch, and it now means the same thing everywhere.
 
 ## Gotchas
 
-- **The remote login shell may be zsh, and zsh aborts a command outright when a glob
-  matches nothing.** `for d in "$root"/*/` made `uts jobs` return rc=1 on an empty
-  jobs directory for all of v2. Remote snippets iterate with
-  `find … | while IFS= read -r` instead.
+- **A glob that matches nothing is still a hazard, even under `sh`.** POSIX sh leaves
+  an unmatched pattern as itself, so `for d in "$root"/*/` iterates once over a
+  literal path that does not exist — `uts jobs` returned rc=1 on an empty jobs
+  directory for all of v2 (then via zsh, which aborts outright instead). Remote
+  snippets iterate with `find … | while IFS= read -r`. Do not simplify it back.
 - `uts shell` cannot be tested with plain pytest (it refuses without a tty). The live
   test builds one with `pty.openpty()` + `subprocess`, **not** `pty.fork()` — by then
   the fan-out tests have left threads in the process and forking one can deadlock.
 - `pkill -f '<pattern>'` over uts can kill the SSH session itself: that session's own
-  `zsh -c …` cmdline contains the pattern. Learned the hard way.
+  `sh -c …` cmdline contains the pattern. Learned the hard way.
 - Tests never mock paramiko. The house style is to assert on the shell string a
   builder produced, and to feed a hand-written fake reply to the matching parser.
   Follow it rather than introducing a mock layer.

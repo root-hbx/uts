@@ -64,6 +64,10 @@ def _interact(conn: Conn, host: Host) -> int:
     cols, rows = _size()
     chan = transport.open_session()
     chan.get_pty(term=_term(), width=cols, height=rows)
+    # invoke_shell, so this is the one path that does *not* go through
+    # remote.posix_wrap: a person asking for a terminal wants their own login shell,
+    # fish prompt and all. Everything else in uts is pinned to POSIX sh precisely so
+    # that it does not depend on that choice. Do not unify the two.
     chan.invoke_shell()
 
     stdin_fd = sys.stdin.fileno()

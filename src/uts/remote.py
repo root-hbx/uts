@@ -76,6 +76,27 @@ def q(value: str) -> str:
     return shlex.quote(value)
 
 
+def posix_wrap(command: str) -> str:
+    """Run `command` under POSIX sh, whatever the account's login shell is.
+
+    sshd hands an exec request to the user's login shell, so without this every
+    snippet in this module is parsed by whatever that account happens to use. bash
+    and zsh are close enough to POSIX to have mostly worked; fish is not a POSIX
+    shell at all and rejects `n=$(...)` outright, which took `uts status` down to
+    `clock ?` on a fish host. Applied at the four exec_command() sites in conn.py
+    rather than at the end of each builder here, so that it covers the command the
+    *user* typed too — one dialect on every host is the whole point.
+
+    This does not discard the user's environment. The login shell still runs
+    (`fish -c "sh -c '...'"`), so anything its rc files export is inherited by sh
+    as an ordinary child process.
+
+    `uts shell` is deliberately exempt: it uses invoke_shell(), and an interactive
+    terminal should be the user's own shell.
+    """
+    return "sh -c " + q(command)
+
+
 # ------------------------------------------------------------------ path specs
 
 class PathSpecError(ValueError):
@@ -345,9 +366,13 @@ printf 'job\\t{name}\\t%s\\n' "$(cat "$d/pid" 2>/dev/null)"
 """
 
 
-# `find | while read` rather than a `"$root"/*/` glob: the remote login shell is
-# whatever the account uses, and zsh aborts the command outright when a glob matches
-# nothing. An empty jobs directory is the normal case, not an error.
+# `find | while read` rather than a `"$root"/*/` glob, because an empty jobs
+# directory is the normal case and must not read as an error. This predates
+# posix_wrap, where the reason was that zsh aborts a command outright on a glob
+# that matches nothing — that reason is gone now that snippets always run under sh.
+# The code stays: POSIX sh leaves an unmatched pattern *as itself*, so the loop
+# would run once over a literal `$root/*/` that does not exist. Same bug, different
+# shape. Do not "simplify" this back to a glob.
 LIST_JOBS = r"""
 root="$HOME/.uts/jobs"
 printf 'now\t%s\n' "$(date +%s)"

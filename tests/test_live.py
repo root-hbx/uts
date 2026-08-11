@@ -740,10 +740,72 @@ def test_a_command_with_no_target_never_reaches_the_network(capsys):
     assert "no host selected" in err and "Known hosts: test" in err
 
 
-def test_a_and_h_reach_the_same_single_host(target, capsys):
-    # The one-machine inventory makes these equivalent; what is being pinned is that
-    # both spellings work and neither is a default.
-    assert main(["status", "-a"]) == EXIT_OK
+def test_a_and_h_reach_the_same_single_host(target, tmp_path, capsys):
+    # What is being pinned is that both spellings work and neither is a default.
+    # The equivalence needs a one-machine inventory, which the author's real
+    # hosts.json stopped being the moment a second host was added — so this builds
+    # its own rather than fanning out over whatever is currently in the file.
+    p = tmp_path / "hosts.json"
+    p.write_text(
+        json.dumps([{"name": "test", "ip": target[0].ip, "user": target[0].user,
+                     "password": target[0].password}]),
+        encoding="utf-8",
+    )
+    assert main(["--inventory", str(p), "status", "-a"]) == EXIT_OK
     with_all = capsys.readouterr().out
-    assert main(["status", "-H", "test"]) == EXIT_OK
+    assert main(["--inventory", str(p), "status", "-H", "test"]) == EXIT_OK
     assert "test (bxhu@" in with_all and "test (bxhu@" in capsys.readouterr().out
+
+
+# ------------------------------------------------------- one dialect, every host
+
+
+def test_the_login_shell_does_not_parse_our_commands(target):
+    """POSIX assignment reaches the far side intact.
+
+    This is the exact construct fish rejected (`fish: Unsupported use of '='`) and
+    that took `uts status` on the fish host down to `clock ?`. This host logs into
+    zsh — which is why the v2 glob gotcha was a *zsh* gotcha — so what this pins is
+    that posix_wrap did not break the near-POSIX case while fixing the fish one.
+    """
+    (r,) = run(target, 'n=$(printf "a\\nb\\n" | wc -l); echo "n=$n"')
+    assert r.reachable, r.error
+    assert r.rc == 0
+    assert r.stdout.strip() == "n=2"
+
+
+def test_snippets_really_run_under_dash_not_bash(target):
+    """The premise of the whole design, tested rather than asserted.
+
+    remote.py is written to POSIX sh on the claim that it uses no bashisms. On this
+    host /bin/sh is dash, so `sh -c` genuinely exercises that claim — if a bashism
+    ever creeps into a snippet, the live suite fails here rather than silently
+    working until someone points uts at a machine without bash.
+    """
+    (r,) = run(target, "readlink -f /bin/sh")
+    assert r.reachable, r.error
+    assert r.stdout.strip().endswith("dash"), f"expected dash, got {r.stdout.strip()}"
+
+
+def test_status_facts_survive_a_dash_shell(target, capsys):
+    """The snippet that broke on fish, end to end: every field parsed, no stderr."""
+    assert main(["status", "-H", "test"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "clock" in out and "?" not in out.split("clock")[1].split("\n")[0]
+    assert "shell" in out                       # the login shell is now reported
+    assert "[stderr]" not in out                # a dialect error would land here
+
+
+def test_bash_is_still_reachable_as_an_explicit_escape_hatch(target):
+    """Pinning commands to sh costs bash syntax; asking for bash explicitly is the
+    documented way back, and it now means the same thing on every host."""
+    (r,) = run(target, 'bash -c "for i in {1..3}; do echo -n \\$i; done"')
+    assert r.reachable, r.error
+    assert r.stdout.strip() == "123"
+
+
+def test_a_quote_dense_snippet_survives_the_wrap(target, capsys):
+    """peek's shape probe embeds an awk program, so it is the most quote-dense
+    string uts sends. Wrapping adds another layer of escaping around all of it."""
+    assert main(["peek", "-H", "test", "/etc/hostname"]) == EXIT_OK
+    assert "[stderr]" not in capsys.readouterr().out

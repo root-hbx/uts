@@ -12,6 +12,16 @@
 ./uts exec -H test-a --write 'rm -rf ~/scratch'
 ```
 
+Commands run under POSIX `sh` on every host, whichever shell the account logs into —
+a bash box, a zsh box and a fish box all behave identically. That is what makes
+`exec -a` trustworthy: one command, one meaning. Bash-only syntax needs asking for:
+
+```bash
+./uts exec -a 'bash -c "for i in {1..5}; do echo $i; done"'
+```
+
+(`uts shell` is the exception — an interactive terminal is your own login shell.)
+
 **(2) Session Management:**
 
 `Sessions` are the handle for anything longer than one command.
