@@ -1,14 +1,14 @@
 [
   {
     "name": "test-a",
-    "ip": "192.168.3.24",
-    "user": "bxhu",
+    "ip": "YOUR_IP",
+    "user": "USER_NAME",
     "password": "PSWD"
   },
   {
     "name": "test-b",
-    "ip": "192.168.3.25",
-    "user": "bxhu",
+    "ip": "YOUR_IP",
+    "user": "USER_NAME",
     "password": "PSWD"
   }
 ]
