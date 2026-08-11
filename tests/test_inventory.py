@@ -27,14 +27,21 @@ def test_optional_fields(tmp_path):
         tmp_path,
         [
             {"name": "a", "ip": "10.0.0.1", "user": "ops", "password": "pw",
-             "port": 2222, "timeout": 3, "tags": ["prod", "web"]},
+             "port": 2222, "timeout": 3},
             {"name": "b", "ip": "10.0.0.2", "password": "pw"},
         ],
     )
     a, b = load_inventory(p)
     assert (a.user, a.port, a.timeout) == ("ops", 2222, 3.0)
-    assert a.tags == ("prod", "web")
-    assert (b.user, b.port, b.tags) == ("root", 22, ())
+    assert (b.user, b.port) == ("root", 22)
+
+
+def test_unknown_fields_are_ignored(tmp_path):
+    # `tags` was a selector feature once. An inventory that still carries one has
+    # to keep working rather than fail to load.
+    p = write(tmp_path, [{"name": "a", "ip": "10.0.0.1", "password": "pw",
+                          "tags": ["prod"], "nickname": "old faithful"}])
+    assert load_inventory(p)[0].name == "a"
 
 
 @pytest.mark.parametrize(
@@ -71,8 +78,8 @@ def hosts(tmp_path):
         write(
             tmp_path,
             [
-                {"name": "a", "ip": "192.168.1.11", "password": "pw", "tags": ["prod", "web"]},
-                {"name": "b", "ip": "192.168.1.12", "password": "pw", "tags": ["prod"]},
+                {"name": "a", "ip": "192.168.1.11", "password": "pw"},
+                {"name": "b", "ip": "192.168.1.12", "password": "pw"},
                 {"name": "c", "ip": "10.0.0.9", "password": "pw"},
             ],
         )
@@ -80,22 +87,46 @@ def hosts(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "selector, expected",
+    "names, expected",
     [
-        (None, ["a", "b", "c"]),
-        ("all", ["a", "b", "c"]),
-        ("b", ["b"]),
-        ("10.0.0.9", ["c"]),          # selecting by IP works too
-        ("a,c", ["a", "c"]),
-        ("@prod", ["a", "b"]),
-        ("192.168.1.*", ["a", "b"]),
-        ("@prod,b,a", ["a", "b"]),    # deduplicated, inventory order preserved
+        (["b"], ["b"]),
+        (["a,c"], ["a", "c"]),                # comma-separated
+        (["a", "c"], ["a", "c"]),             # repeated -H
+        (["c,a"], ["a", "c"]),                # inventory order, not argument order
+        (["c", "a"], ["a", "c"]),
+        (["b,a,b"], ["a", "b"]),              # deduplicated
+        ([" a , c "], ["a", "c"]),            # whitespace tolerated
     ],
 )
-def test_selectors(hosts, selector, expected):
-    assert [h.name for h in select(hosts, selector)] == expected
+def test_named_selection(hosts, names, expected):
+    assert [h.name for h in select(hosts, names)] == expected
 
 
-def test_unknown_selector_lists_known_hosts(hosts):
+def test_all_takes_everything(hosts):
+    assert [h.name for h in select(hosts, None, all_=True)] == ["a", "b", "c"]
+
+
+def test_no_target_is_an_error_not_a_default(hosts):
+    # "every machine I own" must be asked for, never arrived at by omission.
     with pytest.raises(InventoryError, match="Known hosts: a, b, c"):
-        select(hosts, "nope")
+        select(hosts, None)
+    with pytest.raises(InventoryError, match="no host selected"):
+        select(hosts, [])
+
+
+def test_all_and_host_together_are_rejected(hosts):
+    with pytest.raises(InventoryError, match="cannot be combined"):
+        select(hosts, ["a"], all_=True)
+
+
+def test_unknown_name_lists_known_hosts(hosts):
+    with pytest.raises(InventoryError, match="no host named 'nope'. Known hosts: a, b, c"):
+        select(hosts, ["nope"])
+
+
+@pytest.mark.parametrize("gone", ["@prod", "192.168.1.*", "10.0.0.9", "all"])
+def test_tags_globs_ips_and_all_are_no_longer_selectors(hosts, gone):
+    # One spelling, one meaning: the "name" field. Each of these used to resolve to
+    # something, and each made a bare word ambiguous at a glance.
+    with pytest.raises(InventoryError, match="no host named"):
+        select(hosts, [gone])

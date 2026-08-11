@@ -8,14 +8,12 @@ the state report begins has to survive output that looks like a state report.
 import pytest
 
 from uts import remote
-from uts.cli import UsageError, build_parser, split_exec_argv
+from uts.cli import build_parser, join_command
 from uts.session import Session, env_delta
 
 
-def hoist(args):
-    return split_exec_argv(
-        build_parser().parse_args(args).argv, separator_used="--" in args
-    )[0]
+def parse(args):
+    return build_parser().parse_args(args)
 
 
 def wrap_and_parse(command, cwd=None, env=None, tail="/srv\036HOME=/root\0"):
@@ -29,35 +27,31 @@ def wrap_and_parse(command, cwd=None, env=None, tail="/srv\036HOME=/root\0"):
 # ------------------------------------------------------------------ flag position
 
 
-def test_session_after_the_selector_is_hoisted_not_sent_remote():
-    # Same trap --write fell into: REMAINDER takes flags too, so `--session s1`
-    # would otherwise become the first two words of the remote command.
-    assert hoist(["exec", "test", "--session", "s1", "--", "pwd"]) == {"--session": "s1"}
-
-
-def test_session_accepts_the_equals_form():
-    assert hoist(["exec", "test", "--session=s1", "--", "pwd"]) == {"--session": "s1"}
-
-
-def test_session_before_the_selector_is_argparse_business():
-    assert build_parser().parse_args(["exec", "--session", "s1", "test", "--", "pwd"]).session == "s1"
-
-
-def test_session_and_write_hoist_together():
-    assert hoist(["exec", "test", "--write", "--session", "s1", "--", "rm", "x"]) == {
-        "--write": True, "--session": "s1",
-    }
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["exec", "-H", "t", "--session", "s1", "--", "pwd"],
+        ["exec", "-H", "t", "-s", "s1", "--", "pwd"],
+        ["exec", "-H", "t", "--session=s1", "--", "pwd"],
+        ["exec", "--session", "s1", "-H", "t", "--", "pwd"],
+        ["exec", "-H", "t", "--write", "-s", "s1", "--", "pwd"],
+    ],
+)
+def test_the_session_name_is_read_by_uts_not_sent_remote(args):
+    ns = parse(args)
+    assert ns.session == "s1"
+    assert join_command(ns.argv) == "pwd"
 
 
 def test_session_after_the_separator_belongs_to_the_remote_command():
-    hoisted, command = split_exec_argv(["--", "mytool", "--session", "x"], separator_used=True)
-    assert hoisted == {}
-    assert command == "mytool --session x"
+    ns = parse(["exec", "-H", "t", "--", "mytool", "--session", "x"])
+    assert ns.session is None
+    assert join_command(ns.argv) == "mytool --session x"
 
 
 def test_dangling_session_flag_is_a_usage_error():
-    with pytest.raises(UsageError, match="needs a value"):
-        split_exec_argv(["--session"])
+    with pytest.raises(SystemExit):
+        parse(["exec", "-H", "t", "--session"])
 
 
 # ------------------------------------------------------------------ the wrapper
@@ -86,9 +80,10 @@ def test_the_users_rc_survives_the_trailer():
 
 
 def test_no_session_means_the_command_string_is_untouched():
-    # The whole point of opt-in: without --session nothing wraps anything.
-    _, command = split_exec_argv(["--", "echo", "hi"], separator_used=True)
-    assert command == "echo hi"
+    # The whole point of opt-in: without a session name nothing wraps anything.
+    ns = parse(["exec", "-H", "t", "--", "echo", "hi"])
+    assert ns.session is None
+    assert join_command(ns.argv) == "echo hi"
 
 
 # ------------------------------------------------------------------ reading it back

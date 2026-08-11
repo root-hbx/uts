@@ -7,6 +7,11 @@ and keeps the result traceable.
 Transfers go over a single remote tar+gzip stream: logs and numeric matrices both
 compress hard, so per-file SFTP wastes time and bandwidth. Everything streams to
 disk rather than through memory.
+
+`--to` moves where the files land without changing their shape: the
+`<host>/<remote absolute path>` mirror is kept underneath it, because two machines
+can hold the same path and flattening them would let one quietly overwrite the
+other. The manifest stays in `.uts/` regardless — see workspace.Workspace.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ def run(
     lines: int | None,
     dry_run: bool,
     workspace_root: str | None,
+    to: str | None = None,
 ) -> int:
     try:
         remote.check_path_spec(spec)
@@ -50,7 +56,7 @@ def run(
         print(str(exc), file=sys.stderr)
         return EXIT_BLOCKED
 
-    ws = Workspace(workspace_root)
+    ws = Workspace(workspace_root, data_root=to)
 
     def task(conn: Conn) -> Result:
         return _pull_one(conn, spec, size_cap, cutoff, lines, timeout, dry_run, ws)
@@ -146,14 +152,14 @@ def _pull_one(
         else _pull_tar(conn, host, files, timeout, ws, size_cap)
     )
     extra["pulled"] = pulled
-    extra["dest"] = str(ws.path_for(host.name, "").parent)
+    extra["dest"] = str(ws.host_root(host.name))
     return Result(host=host, rc=0, duration=time.monotonic() - started, extra=extra)
 
 
 def _pull_tar(
     conn: Conn, host: Host, files: list[dict], timeout: float, ws: Workspace, size_cap: int
 ) -> int:
-    dest_root = ws.root / host.name
+    dest_root = ws.host_root(host.name)
     dest_root.mkdir(parents=True, exist_ok=True)
     paths = [f["path"] for f in files]
 

@@ -13,13 +13,7 @@ def run(hosts: list[Host], as_json: bool) -> int:
         print(
             json.dumps(
                 [
-                    {
-                        "name": h.name,
-                        "ip": h.ip,
-                        "user": h.user,
-                        "port": h.port,
-                        "tags": list(h.tags),
-                    }
+                    {"name": h.name, "ip": h.ip, "user": h.user, "port": h.port}
                     for h in hosts
                 ],
                 ensure_ascii=False,
@@ -32,7 +26,6 @@ def run(hosts: list[Host], as_json: bool) -> int:
     addr_w = max(len(f"{h.user}@{h.ip}:{h.port}") for h in hosts)
     for h in hosts:
         addr = f"{h.user}@{h.ip}:{h.port}"
-        tags = " ".join(f"@{t}" for t in h.tags)
-        print(f"{h.name:<{name_w}}  {addr:<{addr_w}}  {tags}".rstrip())
-    print(f"\n{plural(len(hosts), 'host')}. Run `uts ping all` to check they are alive.")
+        print(f"{h.name:<{name_w}}  {addr:<{addr_w}}".rstrip())
+    print(f"\n{plural(len(hosts), 'host')}. Run `uts status -a` to check they are alive.")
     return 0

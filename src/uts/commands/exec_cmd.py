@@ -1,4 +1,9 @@
-"""uts exec — run one command on the selected hosts, concurrently."""
+"""uts exec — run one command on the selected hosts, concurrently.
+
+The foreground half of "operate": one command, everywhere, and you wait for it.
+Work that has to outlive the connection is `uts start` instead — see
+commands/sessions.py.
+"""
 
 from __future__ import annotations
 
@@ -11,21 +16,6 @@ from ..inventory import Host
 from ..output import EXIT_BLOCKED, emit
 from ..session import Session, env_delta
 
-# These are uts's global flags and only work *before* the subcommand. Written
-# after `--` they are silently passed to the remote program, which produces wrong
-# results with no visible cause.
-_GLOBAL_FLAGS = ("--hosts", "--jobs", "--timeout", "--max-lines", "--max-bytes", "--json")
-
-
-def _warn_if_global_flag_leaked(command: str) -> None:
-    leaked = [f for f in _GLOBAL_FLAGS if f in command.split()]
-    if leaked:
-        print(
-            f"note: {', '.join(leaked)} are uts's own flags and were just sent to the "
-            f"remote command.\n      Put them before the subcommand: uts {leaked[0]} ... exec ...",
-            file=sys.stderr,
-        )
-
 
 def run(
     hosts: list[Host],
@@ -37,16 +27,13 @@ def run(
     max_cols: int = 200,
     session_name: str | None = None,
     workspace_root: str | None = None,
-    detach: bool = False,
     pty: bool = False,
     duration: float | None = None,
 ) -> int:
     command = command.strip()
     if not command:
-        print("no command given. Usage: uts exec all -- ls -la /var/log", file=sys.stderr)
+        print("no command given. Usage: uts exec -a -- ls -la /var/log", file=sys.stderr)
         return EXIT_BLOCKED
-
-    _warn_if_global_flag_leaked(command)
 
     if not write:
         # The guard reads what the user typed, never the session wrapper built around
@@ -55,17 +42,6 @@ def run(
         if reason:
             print(guard.explain(command, reason), file=sys.stderr)
             return EXIT_BLOCKED
-
-    if detach and pty:
-        print(
-            "--detach and --pty cannot be combined: a detached job has no terminal to "
-            "attach to, and nobody would be reading it.",
-            file=sys.stderr,
-        )
-        return EXIT_BLOCKED
-
-    if detach:
-        return _detach(hosts, command, jobs, limits, as_json, session_name, workspace_root)
 
     if pty:
         results = _run_with_pty(
@@ -125,45 +101,6 @@ def _run_with_pty(
         return result
 
     return run_many(hosts, task, jobs=jobs)
-
-
-def _detach(
-    hosts: list[Host],
-    command: str,
-    jobs: int,
-    limits: Limits,
-    as_json: bool,
-    session_name: str | None,
-    workspace_root: str | None,
-) -> int:
-    from .jobs import render_started
-    from ..output import exit_code, to_json
-
-    # A session's cwd and exports are replayed into the job, but the job does not
-    # report state back: it outlives this call, so there is no "where did it end up"
-    # to record, and its own `cd` belongs to it rather than to the session.
-    session = Session(session_name, workspace_root) if session_name else None
-
-    def task(conn: Conn) -> Result:
-        host = conn.host.name
-        prefix = remote.session_prefix(session.cwd(host), session.env(host)) if session else []
-        job_id = uuid.uuid4().hex[:6]
-        result = conn.run(remote.start_job(job_id, command, prefix), limits)
-        for line in result.stdout.splitlines():
-            parts = line.split("\t")
-            if parts[0] == "job" and len(parts) == 3:
-                result.extra["job"], result.extra["pid"] = parts[1], parts[2]
-                result.stdout = ""
-        if session_name:
-            result.extra["session"] = session_name
-        return result
-
-    results = run_many(hosts, task, jobs=jobs)
-    if as_json:
-        print(to_json(results))
-    else:
-        print("\n\n".join(render_started(r) for r in results))
-    return exit_code(results)
 
 
 def _run_in_session(

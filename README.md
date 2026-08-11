@@ -21,62 +21,73 @@ SSH is the only thing required for each server.
     </picture>
 </p>
 
-## Look around
+## Quick Start
+
+Every command that touches the network says who it is talking to, by the `name` in
+`hosts.json`. There is no default: `-H` for some, `-a` for all.
 
 ```bash
-./uts ping all                                # are the machines alive
-./uts ls test '~/data/'                       # how many, how big, what types, how recent
-./uts peek test '~/data/*.csv'                # right shape? several runs mixed together?
-./uts pull test '~/data/*.csv' --dry-run      # what would be fetched
-./uts pull test '~/data/*.csv'                # fetch into .uts/ and record it
+./uts hosts                                   # what the names are
+./uts status -a                               # are the machines alive
+./uts status -H gpu-01                        # just that one
+./uts ls -H gpu-01,gpu-02 '~/data/'           # several
 ```
-
-Wrap path specs in **single quotes** — `~` and `*` have to reach the remote shell.
-
-## Do something
 
 ```bash
-./uts push @gpu ./setup.sh ./lib '~/bin/'     # send files out; --force to overwrite
-./uts exec @gpu -- nvidia-smi                 # one command, everywhere, at once
-./uts exec test --write 'rm -rf ~/scratch'    # writes are blocked until you say so
+./uts ls -H gpu-01 '~/data/'                  # how many, how big, what types, how recent
+./uts peek -H gpu-01 '~/data/*.csv'           # right shape? several runs mixed together?
+./uts pull -H gpu-01 '~/data/*.csv' --dry-run # what would be fetched
+./uts pull -H gpu-01 '~/data/*.csv'           # fetch into .uts/ and record it
+./uts pull -H gpu-01 '~/data/*.csv' --to ./raw
 ```
-
-**Long jobs** outlive the connection that started them:
 
 ```bash
-./uts exec @gpu --detach -- python train.py --epochs 100
-./uts jobs @gpu                               # running / exited(0) / killed, with elapsed
-./uts logs a 7f3c1a --tail 100
-./uts kill a 7f3c1a
-./uts jobs @gpu --clean                       # remove the finished ones' state
+./uts push -H gpu-01 ./setup.sh ./lib --to '~/bin/'   # --force to overwrite
+./uts exec -a -- nvidia-smi                           # one command, everywhere, at once
+./uts exec -H gpu-01 --write 'rm -rf ~/scratch'       # writes are blocked until you say so
 ```
 
-**Sessions** carry `cd` and exported variables forward. They are opt-in, because a
-command whose meaning depends on invisible state is a command you cannot trust:
+**Sessions** are the handle for anything longer than one command. A name carries
+`cd` and exported variables forward, and it is also what the background job runs
+under — so there is one name to remember, not a name and an id:
 
 ```bash
-./uts exec test --session build 'cd ~/proj && . .venv/bin/activate'
-./uts exec test --session build 'which python'     # → ~/proj/.venv/bin/python
-./uts exec test 'which python'                     # → /usr/bin/python3, untouched
-./uts sessions                                     # where each one currently stands
+./uts exec -H gpu-01 -s build 'cd ~/proj && . .venv/bin/activate'
+./uts exec -H gpu-01 -s build 'which python'   # → ~/proj/.venv/bin/python
+./uts exec -H gpu-01 'which python'            # → /usr/bin/python3, untouched
 ```
+
+Sessions are opt-in, because a command whose meaning depends on invisible state is
+a command you cannot trust. Without `-s`, every command starts from a clean login.
+
+**Work that outlives the connection** starts in a session and stays there:
+
+```bash
+./uts start -H gpu-01 -s train -- python train.py --epochs 100
+./uts ps -a                                    # running / exited(0) / killed / idle
+./uts logs -H gpu-01 -s train --tail 100
+./uts stop -H gpu-01 -s train
+./uts ps -a --clean                            # forget the finished ones
+```
+
+```
+SESSION  HOST    STATE       ELAPSED  CWD      CMD
+build    gpu-01  idle        -        ~/proj   -
+train    gpu-01  running     42m      ~/proj   python train.py --epochs 100
+eval     gpu-02  exited(0)   1h03m    ~/work   python eval.py
+```
+
+A session runs one thing at a time: `uts start` on a name that is already running
+is refused rather than doubled, and reusing a finished name needs `--force`,
+because it discards the log that says how the last run went.
 
 **Terminals**, for the programs that insist on one:
 
 ```bash
-./uts exec test --pty -- sudo systemctl status ssh
-./uts exec test --pty --duration 3 -- btop    # full-screen program → one text frame
-./uts shell test                              # interactive, one host, for a person
+./uts exec -H gpu-01 --pty -- sudo systemctl status ssh
+./uts exec -H gpu-01 --pty --duration 3 -- btop   # full-screen program → one frame
+./uts shell -H gpu-01                             # interactive, one host, for a person
 ```
 
 `./uts` is a shim that uses `uv` to install dependencies, so there is no
 `pip install` step.
-
-## What it does not do
-
-The remote side stays untouched: no agent, no daemon, no installed package. The only
-thing uts leaves there is `~/.uts/jobs/` for detached jobs — plain files, removable
-with `uts jobs --clean`.
-
-`--write` and the guard behind it stop accidents, not attacks. It matches command
-strings with regexes and is trivial to talk around; treat it as a seatbelt.

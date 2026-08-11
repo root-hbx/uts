@@ -22,12 +22,13 @@ from ..output import EXIT_ALL_FAILED, EXIT_BLOCKED
 READY = "uts: connected to {label}. Ctrl-D or `exit` to leave.\n"
 
 
-def run(hosts: list[Host], selector: str) -> int:
+def run(hosts: list[Host]) -> int:
     if len(hosts) != 1:
         names = ", ".join(h.name for h in hosts) or "none"
         print(
-            f"shell needs exactly one host, {selector!r} matched {len(hosts)}: {names}\n"
-            f"Pick one, or run it on all of them at once with: uts exec {selector} -- <command>",
+            f"shell needs exactly one host, this selection has {len(hosts)}: {names}\n"
+            f"Name one with -H, or run something on all of them at once with: "
+            f"uts exec -a -- <command>",
             file=sys.stderr,
         )
         return EXIT_BLOCKED
@@ -35,9 +36,10 @@ def run(hosts: list[Host], selector: str) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print(
             "shell needs a terminal, and this one is a pipe.\n"
-            "For a one-shot command with a pty behind it: uts exec <host> --pty -- <command>\n"
+            "For a one-shot command with a pty behind it: "
+            "uts exec -H <name> --pty -- <command>\n"
             "For a full-screen program rendered as one frame: "
-            "uts exec <host> --pty --duration 3 -- btop",
+            "uts exec -H <name> --pty --duration 3 -- btop",
             file=sys.stderr,
         )
         return EXIT_BLOCKED

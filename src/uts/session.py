@@ -83,6 +83,22 @@ class Session:
         self.save()
         return changed
 
+    def forget(self, host: str | None = None) -> None:
+        """Drop one host's state, or the session entirely once nothing is left.
+
+        Per host, because `uts ps --clean` cleans up the machines it was pointed at:
+        a session that has finished on one host may still be running on another, and
+        removing the file would take that one's cwd with it.
+        """
+        if host is None:
+            self._state = {}
+        else:
+            self._state.pop(host, None)
+        if self._state:
+            self.save()
+        else:
+            self.path.unlink(missing_ok=True)
+
     def save(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.path.write_text(

@@ -5,39 +5,58 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
-from typing import Any
 
 from .conn import DEFAULT_EXEC_TIMEOUT, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, Limits
 from .inventory import InventoryError, load_inventory, select
 from .commands.pull import DEFAULT_MAX_SIZE as PULL_DEFAULT_MAX_SIZE
 from .commands.push import DEFAULT_MAX_SIZE as PUSH_DEFAULT_MAX_SIZE
-from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED, EXIT_BLOCKED
+from .output import DEFAULT_MAX_COLS, EXIT_ALL_FAILED
 
 EPILOG = """\
-selectors:
-  all              every host (default)
-  test             by host name or IP
-  a,b              several hosts
-  @prod            by tag
-  192.168.3.*      glob over name or IP
+choosing hosts -- everything that touches the network takes one of these:
+  -H NAME          one host, by its "name" in hosts.json
+  -H a,b -H c      several: repeat the flag, or separate with commas
+  -a               all of them
+  uts hosts        what the names are
 
 typical flow -- look around, narrow down, then fetch:
-  uts ping all                                  are the machines alive
-  uts ls test '~/data/'                         how many, how big, what types
-  uts peek test '~/data/*.csv'                  right shape? several runs mixed?
-  uts find test '~/data/' --name '*.log' --since 24h
-  uts pull test '~/data/*.csv' --dry-run        see what would be fetched
-  uts pull test '~/data/*.csv'                  fetch into .uts/ and record it
+  uts status -a                                 are the machines alive
+  uts ls -H a '~/data/'                         how many, how big, what types
+  uts peek -H a '~/data/*.csv'                  right shape? several runs mixed?
+  uts find -H a '~/data/' --name '*.log' --since 24h
+  uts pull -H a '~/data/*.csv' --dry-run        see what would be fetched
+  uts pull -H a '~/data/*.csv'                  fetch into .uts/ and record it
 
 the other direction:
-  uts push @gpu ./setup.sh ./lib '~/bin/'       send files out; --force to overwrite
+  uts push -H a ./setup.sh ./lib --to '~/bin/'  send files out; --force to overwrite
+
+running things:
+  uts exec -H a -- nvidia-smi                   one command, and you wait for it
+  uts exec -H a -s build 'cd ~/proj'            -s carries cwd and exports forward
+  uts start -H a -s train -- python train.py    same name, now in the background
+  uts ps -a                                     what each session is doing
+  uts logs -H a -s train --tail 100
+  uts stop -H a -s train
 
 Quote path specs in single quotes: `~` and `*` are expanded by the remote shell.
 """
 
 
-class UsageError(Exception):
-    """The command line is malformed in a way argparse cannot see."""
+def _targeting() -> argparse.ArgumentParser:
+    """`-H` / `-a`, shared by every subcommand that opens a connection.
+
+    Carried on a parent parser rather than a positional: a path and a host name are
+    both bare words, and `uts ls data` should never have to be guessed at. Neither
+    flag is an error -- see inventory.select.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    g = p.add_argument_group("hosts")
+    g.add_argument(
+        "-H", "--host", action="append", metavar="NAME",
+        help='host "name" from hosts.json; repeat or comma-separate for several',
+    )
+    g.add_argument("-a", "--all", action="store_true", help="every host in the inventory")
+    return p
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,7 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--hosts", metavar="PATH", help="host inventory, default ./hosts.json")
+    p.add_argument(
+        "--inventory", metavar="PATH", help="host inventory file, default ./hosts.json"
+    )
     p.add_argument("--jobs", "-j", type=int, default=8, metavar="N", help="concurrency, default 8")
     p.add_argument(
         "--timeout", type=float, default=DEFAULT_EXEC_TIMEOUT, metavar="S",
@@ -68,36 +89,106 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="emit JSON")
     p.add_argument("--workspace", metavar="DIR", help="local workspace, default ./.uts")
 
+    target = _targeting()
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("hosts", help="list the inventory (no network)")
 
-    sp_ping = sub.add_parser("ping", help="reachability, machine profile, clock skew")
-    sp_ping.add_argument("selector", nargs="?", default="all")
+    sub.add_parser(
+        "status", parents=[target],
+        help="reachability, machine profile, clock skew",
+    )
+
+    sp_ls = sub.add_parser(
+        "ls", parents=[target],
+        help="summarise a directory or glob: count, size, types, age",
+    )
+    sp_ls.add_argument("path", help="directory or glob -- wrap it in single quotes")
+
+    sp_find = sub.add_parser(
+        "find", parents=[target], help="filter files by name/time/size and list them"
+    )
+    sp_find.add_argument("path")
+    sp_find.add_argument("--name", metavar="GLOB", help="filename filter, e.g. '*.log'")
+    sp_find.add_argument("--since", metavar="AGE", help="only newer than, e.g. 2h / 7d (file mtime)")
+    sp_find.add_argument("--min-size", metavar="SIZE", help="minimum size, e.g. 1M")
+    sp_find.add_argument("--limit", type=int, default=40, help="max entries listed, default 40")
+    sp_find.add_argument(
+        "--sort", choices=("time", "size"), default="time", help="sort order, default time"
+    )
+
+    sp_peek = sub.add_parser(
+        "peek", parents=[target],
+        help="inspect structure without fetching: line/column/delimiter profile + a sample",
+        description="Profiles a batch of files by default -- only side-by-side comparison "
+                    "reveals that several runs are mixed together.",
+    )
+    sp_peek.add_argument("path")
+    sp_peek.add_argument("-n", "--lines", type=int, default=5, help="sample lines, default 5")
+    sp_peek.add_argument("--max-files", type=int, default=500, help="files to probe, default 500")
+
+    sp_pull = sub.add_parser(
+        "pull", parents=[target],
+        help="fetch remote files into .uts/ (single remote tar+gzip stream)",
+        description="Narrow with ls/peek first. Local paths mirror remote ones and every "
+                    "fetch is recorded in the manifest.",
+    )
+    sp_pull.add_argument("path")
+    sp_pull.add_argument(
+        "--to", metavar="DIR",
+        help="local destination, default ./.uts; files keep their "
+             "<host>/<remote path> layout underneath it, and the manifest stays in .uts",
+    )
+    sp_pull.add_argument("--since", metavar="AGE", help="only newer than, e.g. 24h (file mtime)")
+    sp_pull.add_argument(
+        "--max-size", default=PULL_DEFAULT_MAX_SIZE, metavar="SIZE",
+        help=f"total size limit, default {PULL_DEFAULT_MAX_SIZE}",
+    )
+    sp_pull.add_argument(
+        "--lines", type=int, metavar="N", help="first N lines of each file (max 50 files)"
+    )
+    sp_pull.add_argument("--dry-run", action="store_true", help="report what would be fetched")
+
+    sp_push = sub.add_parser(
+        "push", parents=[target],
+        help="copy local files to the selected hosts (single tar+gzip stream)",
+        description="The mirror of pull: local sources, then --to for the remote "
+                    "destination directory (uts push -H a ./setup.sh ./lib --to '~/bin/'). "
+                    "A source directory is reproduced under the destination by its own "
+                    "name. Existing remote files are never overwritten without --force.",
+    )
+    sp_push.add_argument(
+        "srcs", nargs="+", metavar="SRC", help="one or more local files or directories",
+    )
+    sp_push.add_argument(
+        "--to", metavar="DIR", required=True,
+        help="remote destination directory -- wrap it in single quotes",
+    )
+    sp_push.add_argument(
+        "--force", action="store_true", help="overwrite remote files that already exist"
+    )
+    sp_push.add_argument("--dry-run", action="store_true", help="report what would be sent")
+    sp_push.add_argument(
+        "--max-size", default=PUSH_DEFAULT_MAX_SIZE, metavar="SIZE",
+        help=f"total size limit, default {PUSH_DEFAULT_MAX_SIZE}",
+    )
 
     sp_exec = sub.add_parser(
-        "exec",
+        "exec", parents=[target],
         help="run one command on the selected hosts",
         description="Run one command concurrently. Destructive commands are blocked unless "
                     "--write. Two forms: after `--` each argument is reproduced on the remote "
-                    "side exactly as typed (uts exec test -- pgrep -af 'sleep 600'); a single "
+                    "side exactly as typed (uts exec -H a -- pgrep -af 'sleep 600'); a single "
                     "quoted string is handed to the remote shell as-is, which is what you want "
-                    "for pipes, redirection and globs (uts exec test 'ls ~/data/*.csv | wc -l').",
-    )
-    sp_exec.add_argument("selector", nargs="?", default="all")
-    sp_exec.add_argument(
-        "--write", action="store_true",
-        help="allow destructive commands; accepted before or after the selector",
+                    "for pipes, redirection and globs (uts exec -H a 'ls ~/data/*.csv | wc -l').",
     )
     sp_exec.add_argument(
-        "--session", metavar="NAME",
+        "--write", action="store_true", help="allow destructive commands",
+    )
+    sp_exec.add_argument(
+        "-s", "--session", metavar="NAME",
         help="carry cwd and exported variables over from earlier commands in this "
              "session; without it every command starts from a clean login",
-    )
-    sp_exec.add_argument(
-        "--detach", action="store_true",
-        help="start it in the background and return a job id; check on it with "
-             "uts jobs / uts logs / uts kill",
     )
     sp_exec.add_argument(
         "--pty", action="store_true",
@@ -111,211 +202,130 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_exec.add_argument(
         "argv", nargs=argparse.REMAINDER,
-        help="the command to run; separate it with --, e.g. uts exec all -- ls -la",
+        help="the command to run; separate it with --, e.g. uts exec -a -- ls -la",
     )
 
-    sp_shell = sub.add_parser(
-        "shell",
+    sub.add_parser(
+        "shell", parents=[target],
         help="open an interactive terminal on one host (for a person, not an agent)",
         description="Needs a real terminal and exactly one host. For scripted use, "
                     "uts exec --pty gives the same terminal without the interaction.",
     )
-    sp_shell.add_argument("selector")
 
-    sp_jobs = sub.add_parser("jobs", help="list the detached jobs on the selected hosts")
-    sp_jobs.add_argument("selector", nargs="?", default="all")
-    sp_jobs.add_argument(
-        "--clean", action="store_true", help="remove the finished jobs' state on the remote side"
+    sp_start = sub.add_parser(
+        "start", parents=[target],
+        help="run a command in the background, under a name you choose",
+        description="The command outlives this call and the connection that made it. "
+                    "The session name is the handle for everything afterwards: "
+                    "uts ps, uts logs -s NAME, uts stop -s NAME. If that session "
+                    "already carries a cwd and exports from uts exec -s NAME, the job "
+                    "inherits them.",
+    )
+    sp_start.add_argument(
+        "-s", "--session", metavar="NAME", required=True,
+        help="name for this piece of work; one running job per session",
+    )
+    sp_start.add_argument(
+        "--write", action="store_true", help="allow destructive commands",
+    )
+    sp_start.add_argument(
+        "--force", action="store_true",
+        help="reuse a session name whose last run has finished, discarding its log",
+    )
+    sp_start.add_argument(
+        "argv", nargs=argparse.REMAINDER,
+        help="the command to run; separate it with --",
     )
 
-    sp_logs = sub.add_parser("logs", help="show a detached job's output")
-    sp_logs.add_argument("selector")
-    sp_logs.add_argument("job_id", metavar="JOB-ID")
+    sp_ps = sub.add_parser(
+        "ps", parents=[target],
+        help="what each session is doing: running / exited / idle, and where",
+        description="One table for both halves of a session: the background job on "
+                    "the remote side, and the cwd and exports recorded for it here. "
+                    "A session with state but nothing running shows as idle.",
+    )
+    sp_ps.add_argument("-s", "--session", metavar="NAME", help="only this session")
+    sp_ps.add_argument(
+        "--clean", action="store_true",
+        help="forget the sessions that have finished, on both sides; with -s NAME, "
+             "forget that one even if it is merely idle",
+    )
+
+    sp_logs = sub.add_parser("logs", parents=[target], help="show a session's output")
+    sp_logs.add_argument("-s", "--session", metavar="NAME", required=True)
     sp_logs.add_argument("--tail", type=int, default=50, help="last N lines, default 50")
 
-    sp_kill = sub.add_parser("kill", help="stop a detached job")
-    sp_kill.add_argument("selector")
-    sp_kill.add_argument("job_id", metavar="JOB-ID")
-    sp_kill.add_argument(
+    sp_stop = sub.add_parser("stop", parents=[target], help="stop a running session")
+    sp_stop.add_argument("-s", "--session", metavar="NAME", required=True)
+    sp_stop.add_argument(
         "--force", action="store_true", help="SIGKILL instead of SIGTERM"
     )
-
-    sp_ls = sub.add_parser("ls", help="summarise a directory or glob: count, size, types, age")
-    sp_ls.add_argument("selector")
-    sp_ls.add_argument("path", help="directory or glob -- wrap it in single quotes")
-
-    sp_find = sub.add_parser("find", help="filter files by name/time/size and list them")
-    sp_find.add_argument("selector")
-    sp_find.add_argument("path")
-    sp_find.add_argument("--name", metavar="GLOB", help="filename filter, e.g. '*.log'")
-    sp_find.add_argument("--since", metavar="AGE", help="only newer than, e.g. 2h / 7d (file mtime)")
-    sp_find.add_argument("--min-size", metavar="SIZE", help="minimum size, e.g. 1M")
-    sp_find.add_argument("--limit", type=int, default=40, help="max entries listed, default 40")
-    sp_find.add_argument(
-        "--sort", choices=("time", "size"), default="time", help="sort order, default time"
-    )
-
-    sp_peek = sub.add_parser(
-        "peek",
-        help="inspect structure without fetching: line/column/delimiter profile + a sample",
-        description="Profiles a batch of files by default -- only side-by-side comparison "
-                    "reveals that several runs are mixed together.",
-    )
-    sp_peek.add_argument("selector")
-    sp_peek.add_argument("path")
-    sp_peek.add_argument("-n", "--lines", type=int, default=5, help="sample lines, default 5")
-    sp_peek.add_argument("--max-files", type=int, default=500, help="files to probe, default 500")
-
-    sp_pull = sub.add_parser(
-        "pull",
-        help="fetch remote files into .uts/ (single remote tar+gzip stream)",
-        description="Narrow with ls/peek first. Local paths mirror remote ones and every "
-                    "fetch is recorded in the manifest.",
-    )
-    sp_pull.add_argument("selector")
-    sp_pull.add_argument("path")
-    sp_pull.add_argument("--since", metavar="AGE", help="only newer than, e.g. 24h (file mtime)")
-    sp_pull.add_argument(
-        "--max-size", default=PULL_DEFAULT_MAX_SIZE, metavar="SIZE",
-        help=f"total size limit, default {PULL_DEFAULT_MAX_SIZE}",
-    )
-    sp_pull.add_argument(
-        "--lines", type=int, metavar="N", help="first N lines of each file (max 50 files)"
-    )
-    sp_pull.add_argument("--dry-run", action="store_true", help="report what would be fetched")
-
-    sp_push = sub.add_parser(
-        "push",
-        help="copy local files to the selected hosts (single tar+gzip stream)",
-        description="The mirror of pull, and it reads like cp: every path but the last is "
-                    "local, the last one is the remote destination directory "
-                    "(uts push @gpu ./setup.sh ./lib '~/bin/'). A source directory is "
-                    "reproduced under the destination by its own name. Existing remote "
-                    "files are never overwritten without --force.",
-    )
-    sp_push.add_argument("selector")
-    sp_push.add_argument(
-        "paths", nargs="+", metavar="SRC ... DEST",
-        help="one or more local sources, then the remote destination directory",
-    )
-    sp_push.add_argument(
-        "--force", action="store_true", help="overwrite remote files that already exist"
-    )
-    sp_push.add_argument("--dry-run", action="store_true", help="report what would be sent")
-    sp_push.add_argument(
-        "--max-size", default=PUSH_DEFAULT_MAX_SIZE, metavar="SIZE",
-        help=f"total size limit, default {PUSH_DEFAULT_MAX_SIZE}",
-    )
-
-    sp_sessions = sub.add_parser(
-        "sessions",
-        help="list the named exec sessions and where each one currently stands",
-    )
-    sp_sessions.add_argument("--clear", metavar="NAME", help="forget one session, or 'all'")
 
     sub.add_parser("index", help="rebuild .uts/INDEX.md and print a workspace summary")
 
     return p
 
 
-# exec's own flags, mapped to whether each one takes a value. argparse.REMAINDER
-# swallows everything after the selector, flags included, so every flag added to
-# `exec` has to be listed here too — otherwise it silently becomes the first word
-# of the remote command.
-EXEC_OWN_FLAGS: dict[str, bool] = {
-    "--write": False,
-    "--session": True,
-    "--detach": False,
-    "--pty": False,
-    "--duration": True,
-}
+# uts's own flags. Once the command has started, one of these is far more likely to
+# be misplaced than meant for the remote program — but only far more likely, so it
+# is passed through with a note rather than intercepted.
+UTS_FLAGS = (
+    "-H", "--host", "-a", "--all", "--write", "-s", "--session", "--pty", "--duration",
+    "--inventory", "--jobs", "--timeout", "--max-lines", "--max-bytes", "--max-cols",
+    "--json", "--workspace",
+)
 
 
-def split_exec_argv(
-    argv: list[str], separator_used: bool = False
-) -> tuple[dict[str, Any], str]:
-    """Split `exec`'s REMAINDER into (hoisted flags, command).
+def join_command(argv: list[str]) -> str:
+    """Turn `exec`'s REMAINDER into the single string that reaches the remote shell.
 
-    `uts exec test --write -- rm x` used to send `--write` to the remote shell and
-    silently leave write mode off, because REMAINDER takes flags too. Leading uts
-    flags are therefore hoisted back out here. Anything after an explicit `--`
-    belongs to the remote command and is never touched, so
-    `uts exec test -- mytool --write` still works.
+    Two forms, and they are not interchangeable. After `--`, the tokens are rejoined
+    with shlex.join so the remote argv matches the local one: the local shell has
+    already stripped the quotes, and joining on spaces would hand
+    `-- pgrep -af 'sleep 600'` two patterns instead of one. A lone string is passed
+    through untouched, because quoting it would turn `a | b` into the name of a
+    program to run.
 
-    Quoting is the other half. Joining the tokens with a plain space loses the
-    quotes the local shell already stripped, so `-- pgrep -af 'sleep 600'` arrives
-    as two arguments and fails. shlex.join reproduces the local argv verbatim on
-    the far side. The single-token form stays untouched: it is a shell snippet, and
-    quoting it would turn `'a | b'` into the name of a program to run.
-
-    `separator_used` has to be supplied by the caller from the untouched argv:
-    argparse eats the `--` in `exec test -- rm x` but leaves it in
-    `exec test --write -- rm x`, so by this point it is no longer a reliable signal
-    of what the user typed.
+    The separator survives in argv only because no positional precedes the
+    REMAINDER any more; back when a host selector did, argparse ate it in one
+    position and kept it in the other.
     """
-    hoisted: dict[str, Any] = {}
-    i = 0
-    while i < len(argv):
-        name, eq, inline = argv[i].partition("=")
-        if name not in EXEC_OWN_FLAGS:
-            break
-        if not EXEC_OWN_FLAGS[name]:
-            hoisted[name] = True
-            i += 1
-        elif eq:
-            hoisted[name] = inline
-            i += 1
-        elif i + 1 < len(argv):
-            hoisted[name] = argv[i + 1]
-            i += 2
-        else:
-            raise UsageError(f"{name} needs a value")
+    separator = bool(argv) and argv[0] == "--"
+    parts = argv[1:] if separator else list(argv)
 
-    if i < len(argv) and argv[i] == "--":
-        separator_used = True
-        i += 1
-
-    parts = argv[i:]
-    # Buried in the middle with no `--` in sight, a uts flag is far more likely to be
-    # misplaced than something the remote program wants. Guessing either way would be
-    # wrong sometimes, so it is passed through with a note.
-    if not separator_used:
-        leaked = [flag for flag in EXEC_OWN_FLAGS if flag in parts]
+    if not separator:
+        leaked = [flag for flag in UTS_FLAGS if flag in " ".join(parts).split()]
         if leaked:
             print(
                 f"note: {', '.join(leaked)} was sent to the remote command, not read by uts.\n"
-                f"      Put it before the command: uts exec {leaked[0]} <selector> ...",
+                f"      uts's own flags go before the command: "
+                f"uts exec -H <name> {leaked[0]} ... -- <command>",
                 file=sys.stderr,
             )
 
     if len(parts) == 1:
-        return hoisted, parts[0]
-    return hoisted, shlex.join(parts)
-
-
-def _as_seconds(value) -> float | None:
-    """--duration is a float via argparse but a string when hoisted out of REMAINDER."""
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        raise UsageError(f"--duration wants a number of seconds, got {value!r}") from None
+        return parts[0]
+    return shlex.join(parts)
 
 
 def main(argv: list[str] | None = None) -> int:
-    raw_argv = list(sys.argv[1:] if argv is None else argv)
-    args = build_parser().parse_args(raw_argv)
+    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
 
     try:
-        inventory = load_inventory(args.hosts)
-        selected = select(inventory, getattr(args, "selector", "all"))
+        inventory = load_inventory(args.inventory)
+        # These describe what is already on this machine, so there is nothing for
+        # -H to narrow.
+        if args.command in ("hosts", "index"):
+            selected = list(inventory)
+        else:
+            selected = select(inventory, args.host, args.all)
     except InventoryError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_ALL_FAILED
 
     from .commands import browse, exec_cmd, hosts as hosts_cmd, peek as peek_cmd
-    from .commands import jobs as jobs_cmd, ping as ping_cmd, pull as pull_cmd, push as push_cmd
+    from .commands import pull as pull_cmd, push as push_cmd
+    from .commands import sessions as sessions_cmd, status as status_cmd
 
     if args.command == "index":
         from .workspace import Workspace, plural
@@ -331,81 +341,61 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{summary} across {plural(hosts_seen, 'host')}")
         return 0
 
-    if args.command == "sessions":
-        from .session import Session, list_sessions
-
-        if args.clear:
-            targets = list_sessions(args.workspace) if args.clear == "all" else [
-                Session(args.clear, args.workspace)
-            ]
-            gone = [s.name for s in targets if s.path.exists()]
-            for s in targets:
-                s.path.unlink(missing_ok=True)
-            print(f"cleared: {', '.join(gone)}" if gone else "no such session")
-            return 0
-
-        sessions = list_sessions(args.workspace)
-        if not sessions:
-            print("no sessions yet. Start one with: uts exec <host> --session <name> 'cd ~/proj'")
-            return 0
-        for s in sessions:
-            print(s.name)
-            for host in s.hosts():
-                env = s.env(host)
-                suffix = f"  env {', '.join(sorted(env))}" if env else ""
-                print(f"  {host:<16}{s.cwd(host) or '?'}{suffix}")
-        return 0
-
     if args.command == "hosts":
         return hosts_cmd.run(selected, args.json)
 
-    if args.command == "ping":
-        return ping_cmd.run(selected, args.jobs, args.timeout, args.json)
+    if args.command == "status":
+        return status_cmd.run(selected, args.jobs, args.timeout, args.json)
 
     if args.command == "exec":
         limits = Limits(
             max_lines=args.max_lines, max_bytes=args.max_bytes, timeout=args.timeout
         )
-        try:
-            hoisted, command = split_exec_argv(args.argv, separator_used="--" in raw_argv)
-            duration = _as_seconds(args.duration or hoisted.get("--duration"))
-        except UsageError as exc:
-            print(str(exc), file=sys.stderr)
-            return EXIT_BLOCKED
         return exec_cmd.run(
             selected,
-            command,
+            join_command(args.argv),
             args.jobs,
             limits,
             args.json,
-            args.write or bool(hoisted.get("--write")),
+            args.write,
             args.max_cols,
-            args.session or hoisted.get("--session"),
+            args.session,
             args.workspace,
-            args.detach or bool(hoisted.get("--detach")),
-            args.pty or bool(hoisted.get("--pty")),
-            duration,
+            args.pty,
+            args.duration,
         )
 
     if args.command == "shell":
         from .commands import shell as shell_cmd
 
-        return shell_cmd.run(selected, args.selector)
+        return shell_cmd.run(selected)
 
-    if args.command == "jobs":
-        return jobs_cmd.run_jobs(selected, args.jobs, args.timeout, args.json, args.clean)
+    if args.command == "start":
+        limits = Limits(
+            max_lines=args.max_lines, max_bytes=args.max_bytes, timeout=args.timeout
+        )
+        return sessions_cmd.run_start(
+            selected, join_command(args.argv), args.session, args.jobs, limits,
+            args.json, args.write, args.force, args.workspace,
+        )
+
+    if args.command == "ps":
+        return sessions_cmd.run_ps(
+            selected, args.jobs, args.timeout, args.json, args.clean,
+            args.session, args.workspace,
+        )
 
     if args.command == "logs":
         limits = Limits(
             max_lines=args.max_lines, max_bytes=args.max_bytes, timeout=args.timeout
         )
-        return jobs_cmd.run_logs(
-            selected, args.job_id, args.jobs, limits, args.json, args.tail, args.max_cols
+        return sessions_cmd.run_logs(
+            selected, args.session, args.jobs, limits, args.json, args.tail, args.max_cols
         )
 
-    if args.command == "kill":
-        return jobs_cmd.run_kill(
-            selected, args.job_id, args.jobs, args.timeout, args.json, args.force
+    if args.command == "stop":
+        return sessions_cmd.run_stop(
+            selected, args.session, args.jobs, args.timeout, args.json, args.force
         )
 
     if args.command == "ls":
@@ -426,12 +416,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "pull":
         return pull_cmd.run(
             selected, args.path, args.jobs, args.timeout, args.json,
-            args.max_size, args.since, args.lines, args.dry_run, args.workspace,
+            args.max_size, args.since, args.lines, args.dry_run, args.workspace, args.to,
         )
 
     if args.command == "push":
         return push_cmd.run(
-            selected, args.paths, args.jobs, args.timeout, args.json,
+            selected, args.srcs, args.to, args.jobs, args.timeout, args.json,
             args.force, args.dry_run, args.max_size, args.workspace,
         )
 

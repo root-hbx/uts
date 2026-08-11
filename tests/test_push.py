@@ -27,18 +27,25 @@ def tree(tmp_path):
 # ------------------------------------------------------------------ argv shape
 
 
-def test_last_path_is_the_destination():
-    args = build_parser().parse_args(["push", "test", "./a.sh", "./lib", "~/bin/"])
-    *srcs, dest = args.paths
-    assert srcs == ["./a.sh", "./lib"]
-    assert dest == "~/bin/"
+def test_sources_are_positional_and_the_destination_is_named():
+    # It used to read like cp -- every path but the last one local. The path that
+    # behaves differently now says so instead of relying on where it sits.
+    args = build_parser().parse_args(
+        ["push", "-H", "a", "./a.sh", "./lib", "--to", "~/bin/"]
+    )
+    assert args.srcs == ["./a.sh", "./lib"]
+    assert args.to == "~/bin/"
 
 
-def test_a_single_path_is_not_enough(tmp_path):
-    # Only a destination and no source: caught before anything is sent.
-    from uts.commands.push import run
+def test_the_destination_is_required():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["push", "-H", "a", "./a.sh"])
 
-    assert run([], ["~/bin/"], 1, 10.0, False, False, False, "100M", str(tmp_path)) == 4
+
+def test_a_destination_that_is_a_source_is_no_longer_possible():
+    # `uts push -H a ./a.sh ./b.sh` used to send a.sh to the directory ./b.sh.
+    args = build_parser().parse_args(["push", "-H", "a", "./a.sh", "./b.sh", "--to", "~/bin/"])
+    assert args.srcs == ["./a.sh", "./b.sh"]
 
 
 # ------------------------------------------------------------------ collection

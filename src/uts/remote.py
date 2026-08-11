@@ -278,15 +278,17 @@ def parse_push_probe(stdout: str) -> dict:
     return out
 
 
-# ----------------------------------------------------------------------- jobs
+# ----------------------------------------------------------------------- sessions
 
-# Everything a detached job leaves behind lives here. It is the only footprint uts
-# has on the far side, it is plain files rather than anything running, and
-# `uts jobs --clean` removes it.
+# Everything a background session leaves behind lives here. It is the only footprint
+# uts has on the far side, it is plain files rather than anything running, and
+# `uts ps --clean` removes it.
 JOBS_ROOT = '"$HOME/.uts/jobs"'
 
 
-def start_job(job_id: str, command: str, prefix: list[str] | None = None) -> str:
+def start_job(
+    name: str, command: str, prefix: list[str] | None = None, force: bool = False
+) -> str:
     """Launch a command detached and report the pid it is actually running under.
 
     The pid is recorded by the job itself (`echo $$`) rather than taken from `$!`.
@@ -295,12 +297,17 @@ def start_job(job_id: str, command: str, prefix: list[str] | None = None) -> str
     `kill -0` would then be asking about the wrong process.
 
     Being a session leader also means $$ doubles as the process-group id, which is
-    what lets `uts kill` take down a whole pipeline rather than just its head.
+    what lets `uts stop` take down a whole pipeline rather than just its head.
+
+    The name is the user's now, so the collision check happens here, in the same
+    round trip that starts the job: a running session is never disturbed, and a
+    finished one is only replaced on --force, because replacing it discards the log
+    that says how the last run went.
     """
-    d = f'"$HOME/.uts/jobs/{job_id}"'
+    d = f'"$HOME/.uts/jobs/{check_session_name(name)}"'
     inner = "\n".join([
         f'echo $$ > {d}/pid',
-        # Without this a SIGTERM'd job leaves no rc, and `uts jobs` can only report
+        # Without this a SIGTERM'd job leaves no rc, and `uts ps` can only report
         # that it is no longer there — indistinguishable from a reboot. 143 is the
         # conventional 128+SIGTERM.
         f"trap 'printf %s 143 > {d}/rc; exit 143' TERM",
@@ -309,8 +316,19 @@ def start_job(job_id: str, command: str, prefix: list[str] | None = None) -> str
         f'printf %s "$__uts_rc" > {d}/rc',
         "exit $__uts_rc",
     ])
+    replace = 'rm -rf "$d"' if force else (
+        f'{{ printf \'finished\\n\'; exit 1; }}'
+    )
     return f"""
 d={d}
+if [ -d "$d" ]; then
+  pid=$(cat "$d/pid" 2>/dev/null)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    printf 'busy\\t%s\\n' "$pid"
+    exit 1
+  fi
+  {replace}
+fi
 mkdir -p "$d" || exit 1
 printf '%s' {q(command)} > "$d/cmd"
 date +%s > "$d/started"
@@ -323,15 +341,18 @@ fi
 # would be "started, pid unknown" most of the time.
 i=0
 while [ ! -s "$d/pid" ] && [ $i -lt 20 ]; do sleep 0.05; i=$((i+1)); done
-printf 'job\\t{job_id}\\t%s\\n' "$(cat "$d/pid" 2>/dev/null)"
+printf 'job\\t{name}\\t%s\\n' "$(cat "$d/pid" 2>/dev/null)"
 """
 
 
+# `find | while read` rather than a `"$root"/*/` glob: the remote login shell is
+# whatever the account uses, and zsh aborts the command outright when a glob matches
+# nothing. An empty jobs directory is the normal case, not an error.
 LIST_JOBS = r"""
 root="$HOME/.uts/jobs"
 printf 'now\t%s\n' "$(date +%s)"
 [ -d "$root" ] || exit 0
-for d in "$root"/*/; do
+find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r d; do
   [ -d "$d" ] || continue
   id=$(basename "$d")
   pid=$(cat "$d/pid" 2>/dev/null)
@@ -380,66 +401,90 @@ def parse_jobs(stdout: str) -> tuple[float, list[dict]]:
     return now, jobs
 
 
-def job_log(job_id: str, tail: int) -> str:
-    d = f'"$HOME/.uts/jobs/{check_job_id(job_id)}"'
+def job_log(name: str, tail: int) -> str:
+    d = f'"$HOME/.uts/jobs/{check_session_name(name)}"'
     return f"""
 d={d}
-[ -d "$d" ] || {{ echo "no job {job_id} on this host" >&2; exit 1; }}
+[ -d "$d" ] || {{ echo "no session named {name} on this host" >&2; exit 1; }}
 tail -n {int(tail)} "$d/log"
 """
 
 
-def kill_job(job_id: str, force: bool) -> str:
+def kill_job(name: str, force: bool) -> str:
     """Signal the job's whole process group, falling back to the single pid.
 
-    The group is the point: `python train.py | tee log` detached as one job leaves
-    two processes, and killing only the leader orphans the rest.
+    The group is the point: `python train.py | tee log` started as one session
+    leaves two processes, and killing only the leader orphans the rest.
     """
     sig = "KILL" if force else "TERM"
-    d = f'"$HOME/.uts/jobs/{check_job_id(job_id)}"'
+    d = f'"$HOME/.uts/jobs/{check_session_name(name)}"'
     return f"""
 d={d}
 pid=$(cat "$d/pid" 2>/dev/null)
-[ -n "$pid" ] || {{ echo "no job {job_id} on this host" >&2; exit 1; }}
+[ -n "$pid" ] || {{ echo "no session named {name} on this host" >&2; exit 1; }}
 if kill -{sig} -"$pid" 2>/dev/null || kill -{sig} "$pid" 2>/dev/null; then
-  printf 'signalled %s with SIG{sig} (pid %s)\\n' {q(job_id)} "$pid"
+  printf 'signalled %s with SIG{sig} (pid %s)\\n' {q(name)} "$pid"
 else
-  echo "job {job_id} is no longer running (pid $pid)" >&2
+  echo "session {name} is no longer running (pid $pid)" >&2
   exit 1
 fi
 """
 
 
-CLEAN_JOBS = r"""
+def clean_jobs(name: str | None = None) -> str:
+    """Remove what a finished session left behind, and name what was removed.
+
+    The names come back because the state has two halves: the job directory here,
+    and the cwd/env recorded locally under the same name. Cleaning one without the
+    other would leave `uts ps` showing a session that is half gone.
+    """
+    listing = (
+        f'printf \'%s\\n\' "$root/{check_session_name(name)}"'
+        if name
+        else 'find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null'
+    )
+    return f"""
 root="$HOME/.uts/jobs"
-[ -d "$root" ] || { echo 0; exit 0; }
-n=0
-for d in "$root"/*/; do
+[ -d "$root" ] || exit 0
+{listing} | while IFS= read -r d; do
   [ -d "$d" ] || continue
   pid=$(cat "$d/pid" 2>/dev/null)
-  if [ -f "$d/rc" ] || ! kill -0 "${pid:-0}" 2>/dev/null; then
-    rm -rf "$d" && n=$((n+1))
+  n=$(basename "$d")
+  if [ -f "$d/rc" ] || ! kill -0 "${{pid:-0}}" 2>/dev/null; then
+    rm -rf "$d" && printf 'cleaned\\t%s\\n' "$n"
+  else
+    printf 'busy\\t%s\\n' "$n"
   fi
 done
-echo "$n"
+exit 0
 """
 
 
-def clean_jobs() -> str:
-    return CLEAN_JOBS
+def parse_clean(stdout: str) -> tuple[list[str], list[str]]:
+    """(removed, still running)."""
+    cleaned, busy = [], []
+    for line in stdout.splitlines():
+        key, _, value = line.partition("\t")
+        if key == "cleaned":
+            cleaned.append(value)
+        elif key == "busy":
+            busy.append(value)
+    return cleaned, busy
 
 
-_JOB_ID = re.compile(r"^[A-Za-z0-9]{1,32}$")
+# The name is the user's, and it is interpolated into a path inside a shell
+# snippet. Quoting alone would still allow `../../etc`, so the shape is checked.
+_SESSION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 
 
-def check_job_id(job_id: str) -> str:
-    """Job ids are interpolated into a path inside a shell snippet, so they are held
-    to the shape uts generates rather than merely quoted."""
-    if not _JOB_ID.match(job_id):
+def check_session_name(name: str) -> str:
+    if not _SESSION_NAME.match(name or ""):
         raise PathSpecError(
-            f"{job_id!r} is not a job id. They look like 7f3c1a — run `uts jobs` to list them."
+            f"{name!r} is not a usable session name. Letters, digits, dot, dash and "
+            f"underscore, up to 32 characters, starting with a letter or digit "
+            f"(train, build-2, eval.v3)."
         )
-    return job_id
+    return name
 
 
 # ------------------------------------------------------------------- sessions
@@ -447,7 +492,7 @@ def check_job_id(job_id: str) -> str:
 # `env -0` and `pwd` are appended after the user's command, so the reply has to be
 # separable from whatever the command itself printed. The nonce is regenerated per
 # invocation and the split is on the *last* occurrence, which is what makes
-# `uts exec test --session s 'cat some-uts-transcript.log'` safe.
+# `uts exec -H a -s s 'cat some-uts-transcript.log'` safe.
 SESSION_SENTINEL = "---uts-session-{nonce}---"
 
 # Record separator between cwd and the environment dump. Neither appears in a path

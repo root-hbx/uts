@@ -11,6 +11,21 @@ def test_local_path_mirrors_remote_path(tmp_path):
     assert local == tmp_path / ".uts" / "test" / "home/ops/data/5.txt"
 
 
+def test_pull_to_moves_the_files_but_not_the_record(tmp_path):
+    # `pull --to ./raw`. The <host>/<remote path> mirror is kept underneath, so two
+    # machines holding the same path cannot overwrite each other, and the manifest
+    # stays in .uts/ so there is still one record of everything fetched.
+    ws = Workspace(tmp_path / ".uts", data_root=tmp_path / "raw")
+    assert ws.path_for("test", "/home/ops/5.txt") == tmp_path / "raw/test/home/ops/5.txt"
+    assert ws.manifest_path == tmp_path / ".uts" / "manifest.jsonl"
+    assert ws.index_path == tmp_path / ".uts" / "INDEX.md"
+
+
+def test_without_to_the_files_land_in_the_workspace(tmp_path):
+    ws = Workspace(tmp_path / ".uts")
+    assert ws.path_for("test", "/x.log") == tmp_path / ".uts" / "test" / "x.log"
+
+
 def test_manifest_appends_and_stamps_time(tmp_path):
     ws = Workspace(tmp_path / ".uts")
     ws.record({"host": "a", "remote_path": "/x.log", "size": 10})

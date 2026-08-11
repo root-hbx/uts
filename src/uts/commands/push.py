@@ -7,6 +7,11 @@ run it" degenerated into hand-rolled `cat > file <<EOF` through exec.
 Same transport reasoning as pull — one tar+gzip stream rather than per-file SFTP —
 and the archive is built once locally, then replayed to every host.
 
+The destination is `--to` rather than the last positional. `cp`'s shape reads
+naturally when you can see all the paths at once, but `uts push -H a ./setup.sh
+./lib '~/bin/'` puts the one path that behaves differently in the position that
+looks the most like the others.
+
 Nothing here goes through guard.py. push is a write by definition, so a --write
 flag on every invocation would carry no information; the gate that does carry
 information is --force, which is only needed when something would be overwritten.
@@ -37,7 +42,8 @@ class PushError(ValueError):
 
 def run(
     hosts: list[Host],
-    paths: list[str],
+    srcs: list[str],
+    dest: str,
     jobs: int,
     timeout: float,
     as_json: bool,
@@ -47,12 +53,6 @@ def run(
     workspace_root: str | None,
 ) -> int:
     try:
-        if len(paths) < 2:
-            raise PushError(
-                "push needs at least one source and a destination.\n"
-                "  uts push all ./setup.sh '~/bin/'"
-            )
-        *srcs, dest = paths
         remote.check_dest(dest)
         size_cap = remote.parse_size(max_size)
         files = _collect(srcs)

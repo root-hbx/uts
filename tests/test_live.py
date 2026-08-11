@@ -23,7 +23,7 @@ pytestmark = pytest.mark.live
 
 @pytest.fixture(scope="module")
 def target() -> list[Host]:
-    return select(load_inventory(), "test")
+    return select(load_inventory(), ["test"])
 
 
 def run(hosts, command, **kw):
@@ -66,13 +66,13 @@ def test_quoting_survives_the_round_trip(target):
 
 
 def test_facts_probe_reports_a_clock_skew(target, capsys):
-    assert main(["ping", "test"]) == EXIT_OK
+    assert main(["status", "-H", "test"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "clock" in out and "OK" in out
 
 
 def test_guard_blocks_without_touching_the_network(target, capsys):
-    assert main(["exec", "test", "--", "rm", "-rf", "/tmp/nope"]) != EXIT_OK
+    assert main(["exec", "-H", "test", "--", "rm", "-rf", "/tmp/nope"]) != EXIT_OK
     assert "blocked:" in capsys.readouterr().err
 
 
@@ -83,14 +83,14 @@ def test_wrong_password_reports_auth_failure(target, tmp_path):
     ]
     p = tmp_path / "hosts.json"
     p.write_text(json.dumps(bad), encoding="utf-8")
-    (r,) = run(select(load_inventory(p), "all"), "true")
+    (r,) = run(select(load_inventory(p), None, all_=True), "true")
     assert not r.reachable
     assert "auth failed" in (r.error or "")
 
 
 def test_exit_codes_against_the_real_host(target, capsys):
-    assert main(["exec", "test", "--", "true"]) == EXIT_OK
-    assert main(["exec", "test", "--", "false"]) == EXIT_REMOTE_NONZERO
+    assert main(["exec", "-H", "test", "--", "true"]) == EXIT_OK
+    assert main(["exec", "-H", "test", "--", "false"]) == EXIT_REMOTE_NONZERO
     capsys.readouterr()
 
 
@@ -100,7 +100,7 @@ DATA = "~/starlink-10-10-550-53-grid-LeastDelay"
 
 
 def test_ls_summarises_a_directory(target, capsys):
-    assert main(["ls", "test", f"{DATA}/"]) == EXIT_OK
+    assert main(["ls", "-H", "test", f"{DATA}/"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "files" in out and ".txt" in out
 
@@ -109,28 +109,28 @@ def test_glob_matching_works_not_just_directories(target, capsys):
     # Regression: GNU stat's -c does not expand \t, so the single-file/glob branch
     # parsed 0 files while the directory branch (find -printf) worked. Only a real
     # host exposes this.
-    assert main(["ls", "test", f"{DATA}/*.txt"]) == EXIT_OK
+    assert main(["ls", "-H", "test", f"{DATA}/*.txt"]) == EXIT_OK
     assert "120 files" in capsys.readouterr().out
 
 
 def test_peek_finds_mixed_shapes(target, capsys):
     # This directory holds two runs: 110x110 (December, 10 ground stations) and
     # 104x104 (March, 4 of them)
-    assert main(["peek", "test", f"{DATA}/*.txt"]) == EXIT_OK
+    assert main(["peek", "-H", "test", f"{DATA}/*.txt"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "110 × 110" in out and "104 × 104" in out
     assert "shapes disagree" in out
 
 
 def test_peek_folds_wide_sample_lines(target, capsys):
-    main(["--max-cols", "80", "peek", "test", f"{DATA}/5.txt"])
+    main(["--max-cols", "80", "peek", "-H", "test", f"{DATA}/5.txt"])
     out = capsys.readouterr().out
     assert "more chars on this line" in out
     assert max(len(line) for line in out.splitlines()) < 200
 
 
 def test_find_filters_by_size(target, capsys):
-    assert main(["find", "test", f"{DATA}/", "--name", "*.txt",
+    assert main(["find", "-H", "test", f"{DATA}/", "--name", "*.txt",
                  "--min-size", "55K", "--limit", "3"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "matched 105" in out
@@ -138,7 +138,7 @@ def test_find_filters_by_size(target, capsys):
 
 def test_pull_round_trips_bytes_exactly(target, tmp_path, capsys):
     ws = tmp_path / "ws"
-    assert main(["--workspace", str(ws), "pull", "test", f"{DATA}/595.txt"]) == EXIT_OK
+    assert main(["--workspace", str(ws), "pull", "-H", "test", f"{DATA}/595.txt"]) == EXIT_OK
     capsys.readouterr()
 
     local = ws / "test" / "home/bxhu/starlink-10-10-550-53-grid-LeastDelay/595.txt"
@@ -152,7 +152,7 @@ def test_pull_round_trips_bytes_exactly(target, tmp_path, capsys):
 
 def test_pull_writes_manifest_and_index(target, tmp_path, capsys):
     ws = tmp_path / "ws"
-    main(["--workspace", str(ws), "pull", "test", f"{DATA}/5.txt"])
+    main(["--workspace", str(ws), "pull", "-H", "test", f"{DATA}/5.txt"])
     capsys.readouterr()
 
     entry = json.loads((ws / "manifest.jsonl").read_text().strip())
@@ -166,7 +166,7 @@ def test_pull_refuses_oversized_transfer(target, tmp_path, capsys):
     from uts.output import EXIT_BLOCKED
 
     ws = tmp_path / "ws"
-    code = main(["--workspace", str(ws), "pull", "test", f"{DATA}/*.txt", "--max-size", "1M"])
+    code = main(["--workspace", str(ws), "pull", "-H", "test", f"{DATA}/*.txt", "--max-size", "1M"])
     assert code == EXIT_BLOCKED          # refused, not "unreachable"
     assert "exceed the" in capsys.readouterr().out
     assert not (ws / "manifest.jsonl").exists()   # a refusal must leave no trace
@@ -174,7 +174,7 @@ def test_pull_refuses_oversized_transfer(target, tmp_path, capsys):
 
 def test_pull_lines_mode_truncates(target, tmp_path, capsys):
     ws = tmp_path / "ws"
-    main(["--workspace", str(ws), "pull", "test", f"{DATA}/1.txt", "--lines", "3"])
+    main(["--workspace", str(ws), "pull", "-H", "test", f"{DATA}/1.txt", "--lines", "3"])
     capsys.readouterr()
     local = ws / "test" / "home/bxhu/starlink-10-10-550-53-grid-LeastDelay/1.txt"
     assert len(local.read_text().splitlines()) == 3
@@ -200,8 +200,8 @@ def test_push_round_trips_bytes_exactly(target, tmp_path, probe_dir, capsys):
     src = tmp_path / "payload.txt"
     src.write_bytes(b"line one\nline two\n\xc3\xa9 non-ascii\n")
 
-    assert main(["--workspace", str(tmp_path / "ws"), "push", "test",
-                 str(src), f"{probe_dir}/"]) == EXIT_OK
+    assert main(["--workspace", str(tmp_path / "ws"), "push", "-H", "test",
+                 str(src), "--to", f"{probe_dir}/"]) == EXIT_OK
     capsys.readouterr()
 
     (r,) = run(target, f"sha256sum {probe_dir}/payload.txt")
@@ -214,7 +214,7 @@ def test_push_reproduces_a_directory_by_its_own_name(target, tmp_path, probe_dir
     (lib / "a.py").write_text("a = 1\n")
     (lib / "nested" / "b.py").write_text("b = 2\n")
 
-    main(["--workspace", str(tmp_path / "ws"), "push", "test", str(lib), f"{probe_dir}/"])
+    main(["--workspace", str(tmp_path / "ws"), "push", "-H", "test", str(lib), "--to", f"{probe_dir}/"])
     capsys.readouterr()
 
     (r,) = run(target, f"find {probe_dir} -type f | sort")
@@ -231,17 +231,16 @@ def test_push_refuses_to_overwrite_until_forced(target, tmp_path, probe_dir, cap
     src.write_text("first\n")
     ws = str(tmp_path / "ws")
 
-    assert main(["--workspace", ws, "push", "test", str(src), f"{probe_dir}/"]) == EXIT_OK
+    assert main(["--workspace", ws, "push", "-H", "test", str(src), "--to", f"{probe_dir}/"]) == EXIT_OK
     capsys.readouterr()
 
     src.write_text("second\n")
-    assert main(["--workspace", ws, "push", "test", str(src), f"{probe_dir}/"]) == EXIT_BLOCKED
+    assert main(["--workspace", ws, "push", "-H", "test", str(src), "--to", f"{probe_dir}/"]) == EXIT_BLOCKED
     assert "--force" in capsys.readouterr().out
     (r,) = run(target, f"cat {probe_dir}/once.txt")
     assert r.stdout == "first\n"          # the refusal really left it alone
 
-    assert main(["--workspace", ws, "push", "test", str(src),
-                 f"{probe_dir}/", "--force"]) == EXIT_OK
+    assert main(["--workspace", ws, "push", "-H", "test", str(src), "--to", f"{probe_dir}/", "--force"]) == EXIT_OK
     capsys.readouterr()
     (r,) = run(target, f"cat {probe_dir}/once.txt")
     assert r.stdout == "second\n"
@@ -252,8 +251,7 @@ def test_push_dry_run_sends_nothing(target, tmp_path, probe_dir, capsys):
     src.write_text("should not arrive\n")
     ws = tmp_path / "ws"
 
-    assert main(["--workspace", str(ws), "push", "test", str(src),
-                 f"{probe_dir}/", "--dry-run"]) == EXIT_OK
+    assert main(["--workspace", str(ws), "push", "-H", "test", str(src), "--to", f"{probe_dir}/", "--dry-run"]) == EXIT_OK
     assert "dry-run" in capsys.readouterr().out
 
     (r,) = run(target, f"test -e {probe_dir}/ghost.txt; echo $?")
@@ -266,7 +264,7 @@ def test_push_records_provenance_in_the_manifest(target, tmp_path, probe_dir, ca
     src.write_text("x\n")
     ws = tmp_path / "ws"
 
-    main(["--workspace", str(ws), "push", "test", str(src), f"{probe_dir}/"])
+    main(["--workspace", str(ws), "push", "-H", "test", str(src), "--to", f"{probe_dir}/"])
     capsys.readouterr()
 
     entry = json.loads((ws / "manifest.jsonl").read_text().strip())
@@ -282,12 +280,12 @@ def test_push_records_provenance_in_the_manifest(target, tmp_path, probe_dir, ca
 def test_session_carries_cwd_and_exports_forward(target, tmp_path, capsys):
     ws = str(tmp_path / "ws")
 
-    assert main(["--workspace", ws, "exec", "test", "--session", "s",
+    assert main(["--workspace", ws, "exec", "-H", "test", "-s", "s",
                  "export MY_VAR=hello; cd /tmp"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "cwd → /tmp" in out and "env +MY_VAR" in out
 
-    assert main(["--workspace", ws, "exec", "test", "--session", "s",
+    assert main(["--workspace", ws, "exec", "-H", "test", "-s", "s",
                  'echo "$MY_VAR from $(pwd)"']) == EXIT_OK
     out = capsys.readouterr().out
     assert "hello from /tmp" in out
@@ -296,17 +294,17 @@ def test_session_carries_cwd_and_exports_forward(target, tmp_path, capsys):
 
 def test_a_command_without_session_is_unaffected_by_one(target, tmp_path, capsys):
     ws = str(tmp_path / "ws")
-    main(["--workspace", ws, "exec", "test", "--session", "s", "cd /tmp"])
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "s", "cd /tmp"])
     capsys.readouterr()
 
-    assert main(["--workspace", ws, "exec", "test", "pwd"]) == EXIT_OK
+    assert main(["--workspace", ws, "exec", "-H", "test", "pwd"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "/home/bxhu" in out and "/tmp" not in out
 
 
 def test_the_trailer_never_leaks_into_the_output(target, tmp_path, capsys):
     ws = str(tmp_path / "ws")
-    main(["--workspace", ws, "exec", "test", "--session", "s", "echo just-this"])
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "s", "echo just-this"])
     out = capsys.readouterr().out
     assert "uts-session" not in out
     assert "env -0" not in out
@@ -317,17 +315,17 @@ def test_truncated_output_says_the_session_did_not_move(target, tmp_path, capsys
     # state report down with it. Silence here would leave the agent believing a `cd`
     # landed when it did not.
     ws = str(tmp_path / "ws")
-    main(["--max-lines", "5", "--workspace", ws, "exec", "test", "--session", "s",
+    main(["--max-lines", "5", "--workspace", ws, "exec", "-H", "test", "-s", "s",
           "cd /tmp && seq 1 100000"])
     assert "session unchanged" in capsys.readouterr().out
 
-    main(["--workspace", ws, "exec", "test", "--session", "s", "pwd"])
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "s", "pwd"])
     assert "/home/bxhu" in capsys.readouterr().out
 
 
 def test_session_survives_across_processes(target, tmp_path, capsys):
     ws = str(tmp_path / "ws")
-    main(["--workspace", ws, "exec", "test", "--session", "keep", "cd /etc"])
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "keep", "cd /etc"])
     capsys.readouterr()
 
     from uts.session import Session
@@ -335,123 +333,224 @@ def test_session_survives_across_processes(target, tmp_path, capsys):
     assert Session("keep", ws).cwd("test") == "/etc"
 
 
-# ------------------------------------------------------------------ detached jobs
+# --------------------------------------------------------- background sessions
 
 
 @pytest.fixture
-def no_jobs(target):
-    """Start and end with a clean job list, whichever way the test goes."""
-    main(["jobs", "test", "--clean"])
-    yield
-    main(["jobs", "test", "--clean"])
+def no_jobs(target, tmp_path_factory):
+    """Start and end with a clean session list, whichever way the test goes."""
+    ws = str(tmp_path_factory.mktemp("ws"))
+    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
+    yield ws
+    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
 
 
-def started_job_id(out: str) -> str:
-    return out.split("· job ")[1].split(" ")[0]
-
-
-def test_a_detached_job_outlives_the_connection(target, no_jobs, capsys):
+def test_a_started_session_outlives_the_connection(target, no_jobs, capsys):
     import time
 
-    assert main(["exec", "test", "--detach", "--", "sh", "-c",
+    assert main(["start", "-H", "test", "-s", "outlive", "--", "sh", "-c",
                  "sleep 2; echo finished-later"]) == EXIT_OK
-    job = started_job_id(capsys.readouterr().out)
+    assert "session outlive" in capsys.readouterr().out
 
-    main(["jobs", "test"])
+    main(["ps", "-H", "test"])
     assert "running" in capsys.readouterr().out
 
     time.sleep(4)                          # the SSH channel is long gone by now
-    main(["jobs", "test"])
+    main(["ps", "-H", "test"])
     assert "exited(0)" in capsys.readouterr().out
-    main(["logs", "test", job])
+    main(["logs", "-H", "test", "-s", "outlive"])
     assert "finished-later" in capsys.readouterr().out
 
 
-def test_a_failing_job_keeps_its_exit_code(target, no_jobs, capsys):
+def test_a_failing_session_keeps_its_exit_code(target, no_jobs, capsys):
     import time
 
-    main(["exec", "test", "--detach", "--", "sh", "-c", "exit 7"])
+    main(["start", "-H", "test", "-s", "failing", "--", "sh", "-c", "exit 7"])
     capsys.readouterr()
     time.sleep(2)
-    main(["jobs", "test"])
+    main(["ps", "-H", "test"])
     assert "exited(7)" in capsys.readouterr().out
 
 
-def test_killing_a_job_is_distinguishable_from_it_vanishing(target, no_jobs, capsys):
+def test_stopping_a_session_is_distinguishable_from_it_vanishing(target, no_jobs, capsys):
     import time
 
-    main(["exec", "test", "--detach", "--", "sleep", "120"])
-    job = started_job_id(capsys.readouterr().out)
-    time.sleep(1)
-
-    assert main(["kill", "test", job]) == EXIT_OK
-    assert "SIGTERM" in capsys.readouterr().out
-    time.sleep(1)
-
-    main(["jobs", "test"])
-    assert "killed" in capsys.readouterr().out
-
-
-def test_kill_takes_down_the_whole_process_group(target, no_jobs, capsys):
-    import time
-
-    main(["exec", "test", "--detach", "--", "sh", "-c", "sleep 300 | cat"])
-    job = started_job_id(capsys.readouterr().out)
-    time.sleep(1)
-    main(["kill", "test", job])
+    main(["start", "-H", "test", "-s", "stopme", "--", "sleep", "120"])
     capsys.readouterr()
     time.sleep(1)
 
-    # The `sleep 300` is a child, not the job leader: signalling only the leader
+    assert main(["stop", "-H", "test", "-s", "stopme"]) == EXIT_OK
+    assert "SIGTERM" in capsys.readouterr().out
+    time.sleep(1)
+
+    main(["ps", "-H", "test"])
+    assert "killed" in capsys.readouterr().out
+
+
+def test_stop_takes_down_the_whole_process_group(target, no_jobs, capsys):
+    import time
+
+    main(["start", "-H", "test", "-s", "pipeline", "--", "sh", "-c", "sleep 300 | cat"])
+    capsys.readouterr()
+    time.sleep(1)
+    main(["stop", "-H", "test", "-s", "pipeline"])
+    capsys.readouterr()
+    time.sleep(1)
+
+    # The `sleep 300` is a child, not the session leader: signalling only the leader
     # would leave it running.
     (r,) = run(target, "pgrep -c 'sleep 300'")
     assert r.stdout.strip() in ("", "0")
 
 
-def test_a_detached_job_inherits_the_sessions_cwd(target, tmp_path, no_jobs, capsys):
+def test_a_started_session_inherits_the_cwd_of_its_own_name(target, no_jobs, capsys):
+    # The merge, end to end: `exec -s j` and `start -s j` are the same session, so
+    # the job lands in the directory the earlier command left it in.
     import time
 
-    ws = str(tmp_path / "ws")
-    main(["--workspace", ws, "exec", "test", "--session", "j", "cd /tmp"])
+    ws = no_jobs
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "j", "cd /tmp"])
     capsys.readouterr()
 
-    main(["--workspace", ws, "exec", "test", "--session", "j", "--detach", "--", "pwd"])
-    job = started_job_id(capsys.readouterr().out)
+    main(["--workspace", ws, "start", "-H", "test", "-s", "j", "--", "pwd"])
+    capsys.readouterr()
     time.sleep(2)
-    main(["logs", "test", job])
+    main(["logs", "-H", "test", "-s", "j"])
     assert "/tmp" in capsys.readouterr().out
 
 
-def test_clean_removes_finished_jobs_but_not_running_ones(target, no_jobs, capsys):
+def test_a_running_session_name_is_not_started_over(target, no_jobs, capsys):
+    from uts.output import EXIT_BLOCKED
+
     import time
 
-    main(["exec", "test", "--detach", "--", "true"])
+    main(["start", "-H", "test", "-s", "busy", "--", "sleep", "120"])
     capsys.readouterr()
-    main(["exec", "test", "--detach", "--", "sleep", "120"])
-    keep = started_job_id(capsys.readouterr().out)
+    time.sleep(1)
+
+    assert main(["start", "-H", "test", "-s", "busy", "--", "echo", "second"]) == EXIT_BLOCKED
+    assert "already running" in capsys.readouterr().out
+
+    main(["stop", "-H", "test", "-s", "busy"])
+    capsys.readouterr()
+
+
+def test_a_finished_session_name_needs_force_before_its_log_goes(target, no_jobs, capsys):
+    from uts.output import EXIT_BLOCKED
+
+    import time
+
+    main(["start", "-H", "test", "-s", "reuse", "--", "sh", "-c", "echo first-run"])
+    capsys.readouterr()
     time.sleep(2)
 
-    main(["jobs", "test", "--clean"])
-    assert "removed 1 finished job" in capsys.readouterr().out
-    main(["jobs", "test"])
-    out = capsys.readouterr().out
-    assert keep in out and out.count("\n") == 2      # header plus the survivor
+    assert main(["start", "-H", "test", "-s", "reuse", "--", "echo", "x"]) == EXIT_BLOCKED
+    assert "--force" in capsys.readouterr().out
+    main(["logs", "-H", "test", "-s", "reuse"])
+    assert "first-run" in capsys.readouterr().out      # the refusal kept it
 
-    main(["kill", "test", keep])
+    assert main(["start", "-H", "test", "-s", "reuse", "--force", "--",
+                 "sh", "-c", "echo second-run"]) == EXIT_OK
+    capsys.readouterr()
+    time.sleep(2)
+    main(["logs", "-H", "test", "-s", "reuse"])
+    out = capsys.readouterr().out
+    assert "second-run" in out and "first-run" not in out
+
+
+def test_clean_removes_finished_sessions_but_not_running_ones(target, no_jobs, capsys):
+    import time
+
+    ws = no_jobs
+    main(["--workspace", ws, "start", "-H", "test", "-s", "done", "--", "true"])
+    capsys.readouterr()
+    main(["--workspace", ws, "start", "-H", "test", "-s", "keep", "--", "sleep", "120"])
+    capsys.readouterr()
+    time.sleep(2)
+
+    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
+    out = capsys.readouterr().out
+    assert "done" in out and "still running: keep" in out
+
+    main(["--workspace", ws, "ps", "-H", "test"])
+    out = capsys.readouterr().out
+    assert "keep" in out and "done" not in out
+
+    main(["--workspace", ws, "stop", "-H", "test", "-s", "keep"])
     capsys.readouterr()
 
 
-def test_the_job_footprint_is_confined_and_removable(target, no_jobs, capsys):
+def test_clean_forgets_both_halves_of_a_session(target, no_jobs, capsys):
+    # The state has two homes — the job directory there, the cwd here — and a clean
+    # that only emptied one of them would leave `uts ps` half remembering a session.
     import time
 
-    main(["exec", "test", "--detach", "--", "true"])
+    from uts.session import Session
+
+    ws = no_jobs
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "both", "cd /tmp"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "both", "--", "true"])
+    capsys.readouterr()
+    time.sleep(2)
+    assert Session("both", ws).cwd("test") == "/tmp"
+
+    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
+    capsys.readouterr()
+    assert Session("both", ws).cwd("test") is None
+    (r,) = run(target, "ls -A ~/.uts/jobs 2>/dev/null | wc -l")
+    assert r.stdout.strip() == "0"
+
+
+def test_clean_by_name_forgets_an_idle_session(target, no_jobs, capsys):
+    # Nothing ever ran under this name; only local state exists. Naming it is how
+    # that gets cleared, and the unnamed sweep leaves it alone.
+    from uts.session import Session
+
+    ws = no_jobs
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "idle1", "cd /etc"])
+    capsys.readouterr()
+
+    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
+    capsys.readouterr()
+    assert Session("idle1", ws).cwd("test") == "/etc"      # a sweep spares the idle
+
+    main(["--workspace", ws, "ps", "-H", "test", "-s", "idle1", "--clean"])
+    capsys.readouterr()
+    assert Session("idle1", ws).cwd("test") is None
+
+
+def test_ps_shows_an_idle_session_next_to_a_running_one(target, no_jobs, capsys):
+    ws = no_jobs
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "parked", "cd /etc"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "busy2", "--", "sleep", "60"])
+    capsys.readouterr()
+
+    main(["--workspace", ws, "ps", "-H", "test"])
+    out = capsys.readouterr().out
+    assert "parked" in out and "idle" in out and "/etc" in out
+    assert "busy2" in out and "running" in out
+
+    main(["--workspace", ws, "stop", "-H", "test", "-s", "busy2"])
+    capsys.readouterr()
+
+
+def test_ps_on_an_empty_host_is_not_an_error(target, no_jobs, capsys):
+    # The remote login shell may be zsh, which aborts on a glob that matches
+    # nothing. An empty jobs directory is the normal case.
+    assert main(["--workspace", no_jobs, "ps", "-H", "test"]) == EXIT_OK
+
+
+def test_the_session_footprint_is_confined_and_removable(target, no_jobs, capsys):
+    import time
+
+    main(["start", "-H", "test", "-s", "footprint", "--", "true"])
     capsys.readouterr()
     time.sleep(1)
 
     (r,) = run(target, "ls -d ~/.uts/jobs/*/ 2>/dev/null | wc -l")
     assert r.stdout.strip() == "1"
 
-    main(["jobs", "test", "--clean"])
+    main(["ps", "-H", "test", "--clean"])
     capsys.readouterr()
     (r,) = run(target, "ls -A ~/.uts/jobs 2>/dev/null | wc -l")
     assert r.stdout.strip() == "0"
@@ -461,7 +560,7 @@ def test_the_job_footprint_is_confined_and_removable(target, no_jobs, capsys):
 
 
 def test_pty_gives_the_remote_side_a_real_terminal(target, capsys):
-    assert main(["exec", "test", "--pty", "tty; echo TERM=$TERM"]) == EXIT_OK
+    assert main(["exec", "-H", "test", "--pty", "tty; echo TERM=$TERM"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "/dev/pts/" in out
     assert "TERM=xterm-256color" in out
@@ -469,34 +568,34 @@ def test_pty_gives_the_remote_side_a_real_terminal(target, capsys):
 
 def test_without_pty_there_is_still_no_terminal(target, capsys):
     # The default path must not have quietly changed.
-    main(["exec", "test", "tty"])
+    main(["exec", "-H", "test", "tty"])
     assert "not a tty" in capsys.readouterr().out
 
 
 def test_pty_says_in_the_header_that_stderr_was_merged(target, capsys):
     # Silence here would let an empty stderr read as "nothing went wrong".
-    main(["exec", "test", "--pty", "echo err >&2"])
+    main(["exec", "-H", "test", "--pty", "echo err >&2"])
     out = capsys.readouterr().out
     assert "stderr merged into stdout" in out
     assert "err" in out
 
 
 def test_pty_output_has_no_escape_sequences_left(target, capsys):
-    main(["exec", "test", "--pty", "ls --color=always /etc | head -5"])
+    main(["exec", "-H", "test", "--pty", "ls --color=always /etc | head -5"])
     out = capsys.readouterr().out
     assert "\x1b" not in out
     assert "\r" not in out
 
 
 def test_pty_preserves_the_exit_code(target, capsys):
-    assert main(["exec", "test", "--pty", "exit 9"]) == EXIT_REMOTE_NONZERO
+    assert main(["exec", "-H", "test", "--pty", "exit 9"]) == EXIT_REMOTE_NONZERO
     assert "rc=9" in capsys.readouterr().out
 
 
 def test_a_full_screen_program_comes_back_as_a_readable_frame(target, capsys):
     # The original "uts cannot do this": btop refuses to start without a terminal,
     # and even with one it paints rather than prints.
-    code = main(["--max-cols", "0", "exec", "test", "--pty", "--duration", "3", "--", "btop"])
+    code = main(["--max-cols", "0", "exec", "-H", "test", "--pty", "--duration", "3", "--", "btop"])
     out = capsys.readouterr().out
     assert code == EXIT_OK
     assert "No tty detected" not in out
@@ -505,18 +604,19 @@ def test_a_full_screen_program_comes_back_as_a_readable_frame(target, capsys):
     assert "\x1b" not in out
 
 
-def test_detach_and_pty_together_are_refused(target, capsys):
-    from uts.output import EXIT_BLOCKED
-
-    assert main(["exec", "test", "--pty", "--detach", "--", "btop"]) == EXIT_BLOCKED
-    assert "cannot be combined" in capsys.readouterr().err
+def test_a_background_session_has_no_terminal_to_attach(target, capsys):
+    # `exec --pty --detach` used to have to be refused as a combination. Starting
+    # something in the background is a different verb now, and it has no --pty:
+    # nobody would be reading the terminal it drew.
+    with pytest.raises(SystemExit):
+        main(["start", "-H", "test", "-s", "nopty", "--pty", "--", "btop"])
 
 
 def test_pty_runs_inside_a_session(target, tmp_path, capsys):
     ws = str(tmp_path / "ws")
-    main(["--workspace", ws, "exec", "test", "--session", "p", "cd /etc"])
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "p", "cd /etc"])
     capsys.readouterr()
-    main(["--workspace", ws, "exec", "test", "--session", "p", "--pty", "pwd"])
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "p", "--pty", "pwd"])
     assert "/etc" in capsys.readouterr().out
 
 
@@ -540,7 +640,7 @@ def test_shell_is_a_real_interactive_terminal(target):
     # child before it reaches exec.
     master, slave = pty.openpty()
     proc = subprocess.Popen(
-        ["./uts", "shell", "test"],
+        ["./uts", "shell", "-H", "test"],
         stdin=slave, stdout=slave, stderr=slave,
         env={**os.environ, "TERM": "xterm-256color"},
         start_new_session=True,
@@ -582,5 +682,25 @@ def test_shell_is_a_real_interactive_terminal(target):
 def test_path_spec_injection_is_blocked_before_any_connection(capsys):
     from uts.output import EXIT_BLOCKED
 
-    assert main(["ls", "test", "~/data; rm -rf /"]) == EXIT_BLOCKED
+    assert main(["ls", "-H", "test", "~/data; rm -rf /"]) == EXIT_BLOCKED
     assert "not allowed in a path" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ targeting
+
+
+def test_a_command_with_no_target_never_reaches_the_network(capsys):
+    from uts.output import EXIT_ALL_FAILED
+
+    assert main(["ls", "~/"]) == EXIT_ALL_FAILED
+    err = capsys.readouterr().err
+    assert "no host selected" in err and "Known hosts: test" in err
+
+
+def test_a_and_h_reach_the_same_single_host(target, capsys):
+    # The one-machine inventory makes these equivalent; what is being pinned is that
+    # both spellings work and neither is a default.
+    assert main(["status", "-a"]) == EXIT_OK
+    with_all = capsys.readouterr().out
+    assert main(["status", "-H", "test"]) == EXIT_OK
+    assert "test (bxhu@" in with_all and "test (bxhu@" in capsys.readouterr().out

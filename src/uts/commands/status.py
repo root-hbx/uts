@@ -1,8 +1,8 @@
-"""uts ping — reachability, machine profile, clock skew.
+"""uts status — reachability, machine profile, clock skew.
 
 Clock skew is the easily forgotten part that matters most: when correlating
 timelines across machines, an unnoticed four-minute offset reverses the causal
-order you infer. So it is measured on every ping and warned about past a threshold.
+order you infer. So it is measured every time and warned about past a threshold.
 """
 
 from __future__ import annotations

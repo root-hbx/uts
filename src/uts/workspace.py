@@ -24,8 +24,17 @@ INDEX = "INDEX.md"
 
 
 class Workspace:
-    def __init__(self, root: str | Path | None = None) -> None:
+    """Where pulled files land, and the manifest that says where they came from.
+
+    `data_root` splits off only where the *files* go, for `pull --to`. The manifest
+    and the index stay in `.uts/` either way: one record of everything fetched is
+    worth more than a record that follows the files around, and a `--to` pull still
+    has to be answerable by "when did this arrive, from which machine".
+    """
+
+    def __init__(self, root: str | Path | None = None, data_root: str | Path | None = None):
         self.root = Path(root or WORKSPACE_DIR)
+        self.data_root = Path(data_root).expanduser() if data_root else self.root
 
     @property
     def manifest_path(self) -> Path:
@@ -35,9 +44,12 @@ class Workspace:
     def index_path(self) -> Path:
         return self.root / INDEX
 
+    def host_root(self, host: str) -> Path:
+        return self.data_root / host
+
     def path_for(self, host: str, remote_path: str) -> Path:
         rel = remote_path.lstrip("/")
-        return self.root / host / rel
+        return self.host_root(host) / rel
 
     def record(self, entry: dict) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
