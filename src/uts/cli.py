@@ -36,8 +36,9 @@ running things -- the command is always one quoted string:
   uts exec -H a -s build 'cd ~/proj'            -s carries cwd and exports forward
   uts start -H a -s train 'python train.py'     same name, now in the background
   uts ps -a                                     what each session is doing
-  uts logs -H a -s train --tail 100
-  uts stop -H a -s train
+  uts logs -H a -s train                        its output so far; --tail N for more
+  uts stop -H a -s train                        -a with no -s stops all of them
+  uts stop -a --clean                           the same, and forget them all
 
 Quote path specs and commands in single quotes: `~`, `*` and `|` are for the remote
 shell, not this one.
@@ -248,20 +249,30 @@ def build_parser() -> argparse.ArgumentParser:
                     "A session with state but nothing running shows as idle.",
     )
     sp_ps.add_argument("-s", "--session", metavar="NAME", help="only this session")
-    sp_ps.add_argument(
-        "--clean", action="store_true",
-        help="forget the sessions that have finished, on both sides; with -s NAME, "
-             "forget that one even if it is merely idle",
-    )
 
     sp_logs = sub.add_parser("logs", parents=[target], help="show a session's output")
     sp_logs.add_argument("-s", "--session", metavar="NAME", required=True)
     sp_logs.add_argument("--tail", type=int, default=50, help="last N lines, default 50")
 
-    sp_stop = sub.add_parser("stop", parents=[target], help="stop a running session")
-    sp_stop.add_argument("-s", "--session", metavar="NAME", required=True)
+    sp_stop = sub.add_parser(
+        "stop", parents=[target], help="stop a running session, and optionally forget it",
+        description="-s NAME is one session, its absence is every session on the "
+                    "selected hosts, and --clean is how far to go: stopping keeps the "
+                    "log, because how a run ended is usually why you stopped it, so a "
+                    "name is only freed by --clean.",
+    )
+    sp_stop.add_argument(
+        "-s", "--session", metavar="NAME",
+        help="one session; without it, every session on the selected hosts",
+    )
     sp_stop.add_argument(
         "--force", action="store_true", help="SIGKILL instead of SIGTERM"
+    )
+    sp_stop.add_argument(
+        "--clean", action="store_true",
+        help="forget it afterwards, freeing the name: the job directory on the host "
+             "and the cwd and exports recorded here. Applies at whatever width -s "
+             "gave, including sessions that are merely idle",
     )
 
     sub.add_parser("index", help="rebuild .uts/INDEX.md and print a workspace summary")
@@ -383,8 +394,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ps":
         return sessions_cmd.run_ps(
-            selected, args.jobs, args.timeout, args.json, args.clean,
-            args.session, args.workspace,
+            selected, args.jobs, args.timeout, args.json, args.session, args.workspace,
         )
 
     if args.command == "logs":
@@ -397,7 +407,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "stop":
         return sessions_cmd.run_stop(
-            selected, args.session, args.jobs, args.timeout, args.json, args.force
+            selected, args.session, args.jobs, args.timeout, args.json, args.force,
+            args.clean, args.workspace,
         )
 
     if args.command == "ls":

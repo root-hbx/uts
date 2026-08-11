@@ -90,7 +90,7 @@ def run_start(
                 result.refused = (
                     f"session {name!r} already holds a finished run here, and starting "
                     f"over would discard its log. Keep the name with --force, or clear "
-                    f"it: uts ps -H {host} -s {name} --clean"
+                    f"it: uts stop -H {host} -s {name} --clean"
                 )
                 result.stdout = ""
         return result
@@ -132,19 +132,16 @@ def run_ps(
     jobs: int,
     timeout: float,
     as_json: bool,
-    clean: bool,
     name: str | None,
     workspace_root: str | None,
 ) -> int:
+    """Read only. Removing what a finished session left behind is `uts stop --clean`."""
     if name:
         try:
             remote.check_session_name(name)
         except remote.PathSpecError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_BLOCKED
-
-    if clean:
-        return _clean(hosts, jobs, timeout, as_json, name, workspace_root)
 
     limits = Limits(max_lines=LIST_LIMITS.max_lines, max_bytes=LIST_LIMITS.max_bytes,
                     timeout=timeout)
@@ -183,49 +180,6 @@ def _local_state(workspace_root: str | None) -> dict[str, dict[str, str]]:
     return out
 
 
-def _clean(
-    hosts: list[Host],
-    jobs: int,
-    timeout: float,
-    as_json: bool,
-    name: str | None,
-    workspace_root: str | None,
-) -> int:
-    limits = Limits(max_lines=200, max_bytes=64 << 10, timeout=timeout)
-    command = remote.clean_jobs(name)
-    results = run_many(hosts, lambda c: c.run(command, limits), jobs=jobs)
-
-    for r in results:
-        if not r.reachable:
-            continue
-        cleaned, busy = remote.parse_clean(r.stdout)
-        # Named explicitly, a session is forgotten here even when it never started
-        # anything remotely — that is how an idle session is cleared. The unnamed
-        # sweep only removes what has actually finished.
-        forget = set(cleaned) | ({name} if name and name not in busy else set())
-        for session_name in forget:
-            Session(session_name, workspace_root).forget(r.host.name)
-        r.extra["cleaned"] = sorted(forget)
-        r.extra["busy"] = busy
-        r.stdout = ""
-
-    if as_json:
-        print(json.dumps([_json_item(r) for r in results], ensure_ascii=False, indent=2))
-    else:
-        for r in results:
-            if not r.reachable:
-                print(f"=== {r.host.label} · UNREACHABLE ===\n  {r.error}")
-                continue
-            done = r.extra["cleaned"]
-            line = f"{r.host.name}: cleared {plural(len(done), 'session')}"
-            if done:
-                line += f" ({', '.join(done)})"
-            if r.extra["busy"]:
-                line += f"; still running: {', '.join(r.extra['busy'])}"
-            print(line)
-    return exit_code(results)
-
-
 # ------------------------------------------------------------------ logs, stop
 
 
@@ -248,17 +202,96 @@ def run_logs(
 
 
 def run_stop(
-    hosts: list[Host], name: str, jobs: int, timeout: float, as_json: bool, force: bool
+    hosts: list[Host],
+    name: str | None,
+    jobs: int,
+    timeout: float,
+    as_json: bool,
+    force: bool,
+    clean: bool,
+    workspace_root: str | None,
 ) -> int:
+    """The one verb for being done with a session.
+
+    `-s NAME` names one, its absence means every session on the selected hosts, and
+    --clean is the difference between stopping the work and forgetting it happened.
+    Stopping keeps the log, because how a run ended is usually why you stopped it.
+    """
+    if clean:
+        return _clean(hosts, name, jobs, timeout, as_json, force, workspace_root)
+
     try:
         command = remote.kill_job(name, force)
     except remote.PathSpecError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_BLOCKED
 
-    limits = Limits(max_lines=20, max_bytes=8 << 10, timeout=timeout)
-    results = run_many(hosts, lambda c: c.run(command, limits), jobs=jobs)
+    limits = Limits(max_lines=200, max_bytes=64 << 10, timeout=timeout)
+
+    def task(conn: Conn) -> Result:
+        result = conn.run(command, limits)
+        if name is None and result.reachable and not result.stdout.strip():
+            result.stdout = "nothing running here"
+        return result
+
+    results = run_many(hosts, task, jobs=jobs)
     return emit(results, as_json, hint="", max_cols=0)
+
+
+def _clean(
+    hosts: list[Host],
+    name: str | None,
+    jobs: int,
+    timeout: float,
+    as_json: bool,
+    force: bool,
+    workspace_root: str | None,
+) -> int:
+    """Stop a session and forget it, on both sides: the job there, the cwd/env here.
+
+    One rule at both widths, which is why there is no separate sweep: `-s NAME` is
+    one session, its absence is every session on the selected hosts, and either way
+    a running job is stopped first. `stop` alone already does the stopping in bulk.
+    """
+    limits = Limits(max_lines=200, max_bytes=64 << 10, timeout=timeout)
+    try:
+        command = remote.stop_and_clean(name, force)
+    except remote.PathSpecError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_BLOCKED
+    results = run_many(hosts, lambda c: c.run(command, limits), jobs=jobs)
+
+    local = _local_state(workspace_root)
+    for r in results:
+        if not r.reachable:
+            continue
+        cleaned, busy = remote.parse_clean(r.stdout)
+        # A session is forgotten here even when it never started anything remotely —
+        # that is how an idle one is cleared, and it is the local half of "every
+        # session on this host". Only what refused to die is spared.
+        named = {name} if name else {s for s, seen in local.items() if r.host.name in seen}
+        forget = (set(cleaned) | named) - set(busy)
+        for session_name in forget:
+            Session(session_name, workspace_root).forget(r.host.name)
+        r.extra["cleaned"] = sorted(forget)
+        r.extra["busy"] = busy
+        r.stdout = ""
+
+    if as_json:
+        print(json.dumps([_json_item(r) for r in results], ensure_ascii=False, indent=2))
+    else:
+        for r in results:
+            if not r.reachable:
+                print(f"=== {r.host.label} · UNREACHABLE ===\n  {r.error}")
+                continue
+            done = r.extra["cleaned"]
+            line = f"{r.host.name}: cleared {plural(len(done), 'session')}"
+            if done:
+                line += f" ({', '.join(done)})"
+            if r.extra["busy"]:
+                line += f"; still running: {', '.join(r.extra['busy'])}"
+            print(line)
+    return exit_code(results)
 
 
 # ------------------------------------------------------------------ rendering

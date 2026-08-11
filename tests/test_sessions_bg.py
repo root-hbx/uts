@@ -50,8 +50,22 @@ def test_start_without_a_name_is_refused():
 @pytest.mark.parametrize("command", ["logs", "stop"])
 def test_logs_and_stop_address_a_session_not_an_id(command):
     assert parse([command, "-H", "t", "-s", "train"]).session == "train"
+
+
+def test_logs_needs_a_session_but_stop_does_not():
+    # There is no sensible "show me the output" without a name, but "stop what is
+    # running here" is exactly what -a is for.
     with pytest.raises(SystemExit):
-        parse([command, "-H", "t"])
+        parse(["logs", "-H", "t"])
+    assert parse(["stop", "-a"]).session is None
+
+
+def test_forgetting_a_session_is_a_flag_on_stop_not_on_ps():
+    # ps reads; stop is the verb that changes things, so both halves of "be done
+    # with this session" live on it.
+    assert parse(["stop", "-a", "--clean"]).clean is True
+    with pytest.raises(SystemExit):
+        parse(["ps", "-a", "--clean"])
 
 
 def test_exec_can_no_longer_detach():

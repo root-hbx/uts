@@ -340,9 +340,9 @@ def test_session_survives_across_processes(target, tmp_path, capsys):
 def no_jobs(target, tmp_path_factory):
     """Start and end with a clean session list, whichever way the test goes."""
     ws = str(tmp_path_factory.mktemp("ws"))
-    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
+    main(["--workspace", ws, "stop", "-H", "test", "--clean"])
     yield ws
-    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
+    main(["--workspace", ws, "stop", "-H", "test", "--clean"])
 
 
 def test_a_started_session_outlives_the_connection(target, no_jobs, capsys):
@@ -402,6 +402,48 @@ def test_stop_takes_down_the_whole_process_group(target, no_jobs, capsys):
     assert r.stdout.strip() in ("", "0")
 
 
+def test_stop_without_a_name_takes_down_every_running_session(target, no_jobs, capsys):
+    # -a is the host selector; dropping -s widens it the other way, to every session
+    # on those hosts. The finished ones are not mentioned — they are not a failure.
+    import time
+
+    ws = no_jobs
+    main(["--workspace", ws, "start", "-H", "test", "-s", "wide1", "sleep 120"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "wide2", "sleep 120"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "wide3", "true"])
+    capsys.readouterr()
+    time.sleep(2)
+
+    assert main(["--workspace", ws, "stop", "-H", "test"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "wide1" in out and "wide2" in out and "wide3" not in out
+    time.sleep(1)
+
+    main(["--workspace", ws, "ps", "-H", "test"])
+    out = capsys.readouterr().out
+    assert "running" not in out and out.count("killed") == 2
+
+
+def test_stop_with_clean_ends_a_running_session_in_one_call(target, no_jobs, capsys):
+    # The two halves race: SIGTERM returns before the job's trap has written rc, so
+    # a clean that did not wait would find a live pid and refuse to remove anything.
+    import time
+
+    from uts.session import Session
+
+    ws = no_jobs
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "gone", "cd /tmp"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "gone", "sleep 120"])
+    capsys.readouterr()
+    time.sleep(1)
+
+    assert main(["--workspace", ws, "stop", "-H", "test", "-s", "gone", "--clean"]) == EXIT_OK
+    assert "gone" in capsys.readouterr().out
+    assert Session("gone", ws).cwd("test") is None
+    (r,) = run(target, "ls -A ~/.uts/jobs 2>/dev/null | wc -l")
+    assert r.stdout.strip() == "0"
+
+
 def test_a_started_session_inherits_the_cwd_of_its_own_name(target, no_jobs, capsys):
     # The merge, end to end: `exec -s j` and `start -s j` are the same session, so
     # the job lands in the directory the earlier command left it in.
@@ -456,26 +498,26 @@ def test_a_finished_session_name_needs_force_before_its_log_goes(target, no_jobs
     assert "second-run" in out and "first-run" not in out
 
 
-def test_clean_removes_finished_sessions_but_not_running_ones(target, no_jobs, capsys):
+def test_clean_without_a_name_takes_the_running_ones_too(target, no_jobs, capsys):
+    # One rule at both widths: --clean says how far to go, never whether the work is
+    # stopped. Sparing the running ones here would be a second meaning for the flag.
     import time
 
     ws = no_jobs
     main(["--workspace", ws, "start", "-H", "test", "-s", "done", "true"])
     capsys.readouterr()
-    main(["--workspace", ws, "start", "-H", "test", "-s", "keep", "sleep 120"])
+    main(["--workspace", ws, "start", "-H", "test", "-s", "alive", "sleep 120"])
     capsys.readouterr()
     time.sleep(2)
 
-    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
+    main(["--workspace", ws, "stop", "-H", "test", "--clean"])
     out = capsys.readouterr().out
-    assert "done" in out and "still running: keep" in out
+    assert "done" in out and "alive" in out and "still running" not in out
 
     main(["--workspace", ws, "ps", "-H", "test"])
-    out = capsys.readouterr().out
-    assert "keep" in out and "done" not in out
-
-    main(["--workspace", ws, "stop", "-H", "test", "-s", "keep"])
-    capsys.readouterr()
+    assert "nothing running" in capsys.readouterr().out
+    (r,) = run(target, "ls -A ~/.uts/jobs 2>/dev/null | wc -l")
+    assert r.stdout.strip() == "0"
 
 
 def test_clean_forgets_both_halves_of_a_session(target, no_jobs, capsys):
@@ -492,29 +534,32 @@ def test_clean_forgets_both_halves_of_a_session(target, no_jobs, capsys):
     time.sleep(2)
     assert Session("both", ws).cwd("test") == "/tmp"
 
-    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
+    main(["--workspace", ws, "stop", "-H", "test", "--clean"])
     capsys.readouterr()
     assert Session("both", ws).cwd("test") is None
     (r,) = run(target, "ls -A ~/.uts/jobs 2>/dev/null | wc -l")
     assert r.stdout.strip() == "0"
 
 
-def test_clean_by_name_forgets_an_idle_session(target, no_jobs, capsys):
-    # Nothing ever ran under this name; only local state exists. Naming it is how
-    # that gets cleared, and the unnamed sweep leaves it alone.
+def test_clean_reaches_an_idle_session_that_never_ran_anything(target, no_jobs, capsys):
+    # Nothing ever ran under these names; only local state exists. The remote host
+    # has nothing to report about them, so this half is cleared from here — by name,
+    # and as part of "every session on this host".
     from uts.session import Session
 
     ws = no_jobs
     main(["--workspace", ws, "exec", "-H", "test", "-s", "idle1", "cd /etc"])
+    main(["--workspace", ws, "exec", "-H", "test", "-s", "idle2", "cd /var"])
     capsys.readouterr()
 
-    main(["--workspace", ws, "ps", "-H", "test", "--clean"])
-    capsys.readouterr()
-    assert Session("idle1", ws).cwd("test") == "/etc"      # a sweep spares the idle
-
-    main(["--workspace", ws, "ps", "-H", "test", "-s", "idle1", "--clean"])
+    main(["--workspace", ws, "stop", "-H", "test", "-s", "idle1", "--clean"])
     capsys.readouterr()
     assert Session("idle1", ws).cwd("test") is None
+    assert Session("idle2", ws).cwd("test") == "/var"      # named means only that one
+
+    main(["--workspace", ws, "stop", "-H", "test", "--clean"])
+    capsys.readouterr()
+    assert Session("idle2", ws).cwd("test") is None
 
 
 def test_ps_shows_an_idle_session_next_to_a_running_one(target, no_jobs, capsys):
@@ -548,7 +593,7 @@ def test_the_session_footprint_is_confined_and_removable(target, no_jobs, capsys
     (r,) = run(target, "ls -d ~/.uts/jobs/*/ 2>/dev/null | wc -l")
     assert r.stdout.strip() == "1"
 
-    main(["ps", "-H", "test", "--clean"])
+    main(["stop", "-H", "test", "--clean"])
     capsys.readouterr()
     (r,) = run(target, "ls -A ~/.uts/jobs 2>/dev/null | wc -l")
     assert r.stdout.strip() == "0"

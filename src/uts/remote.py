@@ -410,13 +410,31 @@ tail -n {int(tail)} "$d/log"
 """
 
 
-def kill_job(name: str, force: bool) -> str:
+def kill_job(name: str | None, force: bool) -> str:
     """Signal the job's whole process group, falling back to the single pid.
 
     The group is the point: `python train.py | tee log` started as one session
     leaves two processes, and killing only the leader orphans the rest.
+
+    Without a name, every session running on this host is signalled. That sweep
+    stays silent about the ones that have already finished — they are not a failure
+    to stop, and saying so per host per session would bury the lines that matter.
     """
     sig = "KILL" if force else "TERM"
+    if name is None:
+        return f"""
+root="$HOME/.uts/jobs"
+[ -d "$root" ] || exit 0
+find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r d; do
+  pid=$(cat "$d/pid" 2>/dev/null)
+  [ -n "$pid" ] || continue
+  kill -0 "$pid" 2>/dev/null || continue
+  if kill -{sig} -"$pid" 2>/dev/null || kill -{sig} "$pid" 2>/dev/null; then
+    printf 'signalled %s with SIG{sig} (pid %s)\\n' "$(basename "$d")" "$pid"
+  fi
+done
+exit 0
+"""
     d = f'"$HOME/.uts/jobs/{check_session_name(name)}"'
     return f"""
 d={d}
@@ -431,29 +449,46 @@ fi
 """
 
 
-def clean_jobs(name: str | None = None) -> str:
-    """Remove what a finished session left behind, and name what was removed.
+def stop_and_clean(name: str | None, force: bool) -> str:
+    """`uts stop --clean`: stop it if it is running, then remove what it left behind.
 
-    The names come back because the state has two halves: the job directory here,
-    and the cwd/env recorded locally under the same name. Cleaning one without the
-    other would leave `uts ps` showing a session that is half gone.
+    One rule at both widths — a named session, or every session on the host. `stop`
+    without --clean already kills in bulk, so the flag never decides *whether* work
+    is stopped, only whether the name is freed afterwards. Making the unnamed form
+    spare running jobs would mean one flag with two meanings.
+
+    Stopping and cleaning have to travel together, in one round trip: SIGTERM
+    returns long before the job's own trap has written rc, and a clean arriving in
+    that window sees a live pid and refuses to remove anything — leaving the name
+    still taken, which is the one thing --clean is for. Waiting here is the only
+    place that can watch the process actually go.
+
+    The `rc` file, not the pid, is what says a job is over: pids are reused, and a
+    session whose rc is already written must never be signalled again.
     """
+    sig = "KILL" if force else "TERM"
     listing = (
         f'printf \'%s\\n\' "$root/{check_session_name(name)}"'
         if name
         else 'find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null'
     )
+    live = '[ ! -f "$d/rc" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null'
     return f"""
 root="$HOME/.uts/jobs"
 [ -d "$root" ] || exit 0
 {listing} | while IFS= read -r d; do
   [ -d "$d" ] || continue
-  pid=$(cat "$d/pid" 2>/dev/null)
   n=$(basename "$d")
-  if [ -f "$d/rc" ] || ! kill -0 "${{pid:-0}}" 2>/dev/null; then
-    rm -rf "$d" && printf 'cleaned\\t%s\\n' "$n"
-  else
+  pid=$(cat "$d/pid" 2>/dev/null)
+  if {live}; then
+    kill -{sig} -"$pid" 2>/dev/null || kill -{sig} "$pid" 2>/dev/null
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done
+  fi
+  if {live}; then
     printf 'busy\\t%s\\n' "$n"
+  else
+    rm -rf "$d" && printf 'cleaned\\t%s\\n' "$n"
   fi
 done
 exit 0
