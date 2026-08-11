@@ -1,4 +1,4 @@
-## For Developers
+# For Developers
 
 **(1) Remote Execution:**
 
@@ -73,6 +73,6 @@ For the programs that insist on one:
 password, anything curses-based, a pager — behaves as it would if you had typed the
 command yourself.
 
-The cost is that a terminal is a single stream: stderr comes back
-merged into stdout, so leave `--pty` off when you want output you can parse.
+The cost is that a terminal is a single stream: `stderr` comes back
+merged into `stdout`, so leave `--pty` off for daily use.
 

@@ -7,8 +7,7 @@ An AI agent is bounded by what it can see and that boundary is usually a single 
 **UTS** pushes it out to the edge of the subnet: deploy Claude Code/Codex/Gemini on one machine
 and it can survey, query and collect across all of them, including PC, COTS Server, **even** Proprietary Hardware Testbed.
 
-Nothing runs on the other side. No agent, no daemon, no installed package.
-SSH is the only thing required for each server.
+Nothing runs on the other side. No agent/daemon/package. SSH is ALL YOU NEED.
 
 <h3 align="center">
     Unifying The Sky: One Claude/Codex/Gemini Deployment, Multiple Backends Support
