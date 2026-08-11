@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # Entry shim: uv handles dependencies, so nothing needs installing first.
+#
+# The symlink walk matters: `uts` is meant to be reachable from any project, so it
+# gets linked onto PATH (see install-skill). Without resolving the link, $DIR would
+# be ~/.local/bin and --project would point at a directory with no pyproject.toml.
 set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="${BASH_SOURCE[0]}"
+while [ -L "$SRC" ]; do
+    DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+    SRC="$(readlink "$SRC")"
+    [[ $SRC != /* ]] && SRC="$DIR/$SRC"
+done
+DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
 exec uv run --quiet --project "$DIR" uts "$@"

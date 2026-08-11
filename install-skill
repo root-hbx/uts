@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Make uts reachable from any project, not just from this repo.
+#
+# Two symlinks, both pointing back here, so this checkout stays the single source of
+# truth: editing the skill or the code takes effect immediately, with no reinstall.
+#
+#   ~/.claude/skills/uts  -> .claude/skills/uts   the agent learns the tool exists
+#   ~/.local/bin/uts      -> ./uts                the agent can actually run it
+#
+# Without the first, an agent only knows about uts while you happen to be working
+# inside this repo, which is not what "deploy an agent on one machine and it can
+# survey the subnet" promises.
+set -euo pipefail
+
+DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DST="${HOME}/.claude/skills/uts"
+BIN_DST="${HOME}/.local/bin/uts"
+
+link() {
+    local src=$1 dst=$2
+    mkdir -p "$(dirname "$dst")"
+    if [ -e "$dst" ] && [ ! -L "$dst" ]; then
+        echo "refusing to replace $dst: it exists and is not a symlink" >&2
+        return 1
+    fi
+    ln -sfn "$src" "$dst"
+    echo "  $dst -> $src"
+}
+
+echo "linking:"
+link "${DIR}/.claude/skills/uts" "$SKILL_DST"
+link "${DIR}/uts" "$BIN_DST"
+
+echo
+case ":${PATH}:" in
+    *":${HOME}/.local/bin:"*) ;;
+    *) echo "note: ${HOME}/.local/bin is not on your PATH; add it, or the agent will "
+       echo "      have to call ${DIR}/uts by its full path." ;;
+esac
+
+echo "done. Open a new session and ask about a remote machine — no need to mention uts."
